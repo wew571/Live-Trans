@@ -9,3 +9,6 @@ __pycache__/
 # Local Graphify tools and generated output
 /Graphify/
 /graphify-out/
+
+# Local development notes
+/docs/
