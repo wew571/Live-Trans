@@ -1,0 +1,12 @@
+# Dashboard, capture and shared PyTorch runtime. Windows x64, Python 3.12.
+# Setup keeps compatible installed CPU/CUDA builds of torch and torchvision.
+torch==2.11.0
+torchvision==0.26.0
+numpy==2.3.5
+opencv-contrib-python==4.10.0.84
+Pillow==12.2.0
+customtkinter==5.2.2
+keyboard==0.13.5
+mss==10.1.0
+pywin32==312
+python-dotenv==1.2.2

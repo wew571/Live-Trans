@@ -1,0 +1,8 @@
+# Tool installation and generated files are not MangaLens source.
+Graphify/
+graphify-out/
+.venv/
+__pycache__/
+models/
+model/
+.env

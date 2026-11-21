@@ -1,0 +1,2 @@
+# Use the OpenCV provider and NumPy already supplied by requirements.txt.
+windows-capture==2.0.1

@@ -1,0 +1,11 @@
+# Local settings, environments and model caches
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+/model/
+/models/
+
+# Local Graphify tools and generated output
+/Graphify/
+/graphify-out/
