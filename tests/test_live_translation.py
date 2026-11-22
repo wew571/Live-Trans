@@ -1,7 +1,7 @@
 import threading
 import time
 import unittest
-from collections import Counter
+from collections import Counter, OrderedDict
 from contextlib import contextmanager
 
 import numpy as np
@@ -261,6 +261,19 @@ class LiveTranslationTests(unittest.TestCase):
         self.screen.show(4)
         self.assertEqual(self.wait_for_update().lines[0].translation, 'VI 8% off')
         self.assertEqual(self.models.batches, [['8% off']])
+
+    def test_ocr_skips_single_character_results_before_translation(self):
+        sources = (
+            'U', '盛', 'MA', 'C', 'O', 'の', 'S', 'y', 'C', 'B', 'Y', 'U',
+            'M', 'U', '心', '人', 'L6', 'A', '8V', 'A', 'B', 'O',
+            ' U. ', '「の」', 'はい', '人\nの心',
+        )
+        detected = [(BOX, source) for source in sources]
+        lines = self.session._translate(self.models, detected, OrderedDict(), preserve_line_breaks=True)
+
+        expected = ['MA', 'L6', '8V', 'はい', '人\nの心']
+        self.assertEqual(self.models.batches, [expected])
+        self.assertEqual([line.source for line in lines], expected)
 
 
 if __name__ == '__main__':

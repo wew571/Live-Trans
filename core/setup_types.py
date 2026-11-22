@@ -20,3 +20,4 @@ class InstallationItem:
     is_ready: Callable[[], bool]
     install: Callable[[Progress], None]
     install_with_log: Callable[[Progress, InstallLog], None] | None = None
+    optional: bool = False

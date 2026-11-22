@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
+from time import monotonic, sleep
 
 import keyboard
 import pytest
@@ -42,10 +43,235 @@ def test_dashboard_uses_live_trans_name_and_transparent_assets(panel):
     dashboard, _, _ = panel
     assert dashboard.title() == "Live Trans"
     assert dashboard.logo_label.cget("text") == "Live Trans"
-    for widget in (dashboard.logo_label, dashboard.btn_pick_window):
+    for widget in (dashboard.logo_label, dashboard.btn_pick_window, dashboard.btn_settings):
         im = widget.cget("image").cget("light_image")
         assert im.mode == "RGBA"
         assert im.getchannel("A").getextrema() == (0, 255)
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_settings_xhigh_saves_only_when_required_items_are_ready(panel, tmp_path, monkeypatch, ready):
+    from core.ocr_settings import OCRSettings, PRESETS
+    from frontend import ocr_settings_window, ui
+
+    dashboard, session, _ = panel
+    item = SimpleNamespace(label="Qwen GGUF", is_ready=lambda: ready)
+    inventory = Mock(side_effect=lambda _root, settings: [item] if settings.flow == "direct" else [])
+    monkeypatch.setattr(ocr_settings_window, "model_items", inventory)
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+
+    dashboard.trigger_scan()
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    dialog._choose_preset(3)
+    assert dialog.preset_name.cget("text") == "XHigh"
+    assert dialog.det_menu.get() == dialog.rec_menu.get() == "PP-OCRv6 Medium"
+    dialog.save_button.invoke()
+
+    if not ready:
+        assert "Qwen GGUF" in dialog.status.cget("text")
+        assert "Thiết lập" in dialog.status.cget("text")
+        assert dialog.winfo_exists()
+        assert OCRSettings.load(tmp_path) == dashboard._ocr_settings == OCRSettings()
+        session.close.assert_not_called()
+        dialog.destroy()
+        return
+
+    deadline = monotonic() + 3
+    while dialog.winfo_exists() and monotonic() < deadline:
+        dashboard.update()
+        sleep(0.01)
+    assert not dialog.winfo_exists()
+    inventory.assert_called_with(tmp_path, PRESETS["XHigh"])
+    assert OCRSettings.load(tmp_path) == dashboard._ocr_settings == PRESETS["XHigh"]
+    session.close.assert_called_once()
+    assert dashboard._live_session is None
+
+
+def test_advanced_direct_flow_retains_context_and_marks_a_custom_preset(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    dialog.advanced_button.invoke()
+    dialog._choose_preset(3)
+    dialog.det_menu.set("PP-OCRv6 Small")
+    dialog._update_selection()
+    assert dialog.preset_name.cget("text") == "Tùy chỉnh"
+    assert dialog.context_entry.winfo_manager()
+    dialog.context_text.set("25001")
+    dialog.save_button.invoke()
+    assert dialog.winfo_exists()
+    assert OCRSettings.load(tmp_path).flow == "pivot"
+    dialog.context_text.set("5200")
+    dialog.save_button.invoke()
+    assert not dialog.winfo_exists()
+    assert OCRSettings.load(tmp_path) == OCRSettings(rec="medium", flow="direct", qwen_context=5200)
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_flash_and_medium_lock_pivot_while_allowing_advanced_customization(panel, tmp_path, monkeypatch, index):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    dialog._choose_preset(index)
+    assert dialog.flow_menu.cget("state") == "disabled"
+    dialog.det_menu.set("PP-OCRv6 Medium" if index == 0 else "PP-OCRv6 Small")
+    dialog.ja_menu.set("NLLB-200 Distilled 600M" if index == 0 else "Mitsua ElanMT")
+    dialog._update_selection()
+    assert dialog.flow_menu.cget("state") == "disabled"
+    assert dialog._selection().flow == "pivot"
+    dialog.save_button.invoke()
+    saved = OCRSettings.load(tmp_path)
+    assert saved.flow == "pivot"
+    assert saved.det == ("medium" if index == 0 else "small")
+    assert saved.ja_model == ("nllb" if index == 0 else "mitsua")
+
+
+@pytest.mark.parametrize("index, model, label", [(2, "2b", "Qwen3.5-2B Q4_K_M"), (3, "4b", "Qwen3.5-4B Q4_K_M")])
+def test_qwen_preset_preserves_variant_through_advanced_and_rule_changes(panel, tmp_path, monkeypatch, index, model, label):
+    from core.ocr_settings import OCRSettings
+    from core.qwen_rules import QwenRule
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    dialog._choose_preset(index)
+    assert label in dialog.summary.cget("text")
+    assert label in dialog.context_label.cget("text")
+    assert dialog.flow_menu.cget("state") == "normal"
+    dialog.flow_menu.set("Nhật → Anh → Việt")
+    dialog._update_selection()
+    dialog.flow_menu.set("Nhật → Việt · Anh → Việt")
+    dialog.det_menu.set("PP-OCRv6 Small")
+    dialog._select_rule(QwenRule("a" * 32, "Rule", "Text"))
+    dialog.context_text.set("5200")
+    dialog._update_selection()
+    dialog.save_button.invoke()
+    saved = OCRSettings.load(tmp_path)
+    assert saved.qwen_model == model
+    assert saved.qwen_context == 5200
+    assert saved.qwen_rule == QwenRule("a" * 32, "Rule", "Text")
+
+
+def test_matching_medium_by_advanced_edits_locks_the_flow(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import PRESETS
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", PRESETS["High"])
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    try:
+        dialog.flow_menu.set("Nhật → Anh → Việt")
+        dialog.rec_menu.set("PP-OCRv6 Small")
+        dialog.ja_menu.set("NLLB-200 Distilled 600M")
+        dialog._update_selection()
+        assert dialog.preset_name.cget("text") == "Medium"
+        assert dialog.flow_menu.cget("state") == "disabled"
+    finally:
+        dialog.destroy()
+
+
+def test_high_missing_model_blocks_save_with_warning(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda _root, settings: [
+        SimpleNamespace(label="Qwen 2B", is_ready=lambda: False)
+    ] if settings.qwen_model == "2b" and settings.flow == "direct" else [])
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    dialog._choose_preset(2)
+    dialog.save_button.invoke()
+    assert dialog.winfo_exists()
+    assert "Qwen 2B" in dialog.status.cget("text")
+    assert OCRSettings.load(tmp_path) == OCRSettings()
+    dialog.destroy()
+
+
+def test_sidebar_setup_offers_missing_nllb_after_medium_save_is_blocked(panel, tmp_path, monkeypatch):
+    import tkinter as tk
+    from tkinter import ttk
+
+    from core import setup_models
+    from core.ocr_settings import PRESETS
+    from frontend import ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", PRESETS["Flash"])
+    monkeypatch.setattr(setup_models, "_ready_path", lambda root, env, model: (
+        None if model.key == "translate-ja-en-nllb" else tmp_path
+    ))
+
+    dashboard.btn_settings.invoke()
+    settings = dashboard._settings_window
+    try:
+        settings._choose_preset(1)
+        settings.save_button.invoke()
+        assert "NLLB" in settings.status.cget("text")
+        assert dashboard._ocr_settings == PRESETS["Flash"]
+    finally:
+        settings.destroy()
+
+    def descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from descendants(child)
+
+    deadline = monotonic() + 3
+    offered = False
+
+    def check_setup():
+        nonlocal offered, timer
+        window = dashboard.grab_current()
+        if isinstance(window, tk.Toplevel):
+            controls = list(descendants(window))
+            optional_group = any(isinstance(widget, ttk.Label) and widget.winfo_ismapped()
+                                 and widget.cget("text") == "Mô hình bổ sung" for widget in controls)
+            addon = any(isinstance(widget, ttk.Checkbutton) and widget.winfo_ismapped()
+                        and widget.instate(["!disabled"]) and "NLLB" in widget.cget("text")
+                        for widget in controls)
+            continue_button = next((widget for widget in controls if isinstance(widget, ttk.Button)
+                                    and widget.winfo_ismapped() and widget.instate(["!disabled"])
+                                    and widget.cget("text") == "Tiếp tục"), None)
+            if optional_group and addon and continue_button is not None:
+                offered = True
+                continue_button.invoke()
+                return
+            if monotonic() >= deadline:
+                window.tk.call(window.protocol("WM_DELETE_WINDOW"))
+                return
+        timer = dashboard.after(10, check_setup)
+
+    timer = dashboard.after(10, check_setup)
+    try:
+        dashboard.btn_setup.invoke()
+    finally:
+        dashboard.after_cancel(timer)
+    assert offered, "Setup closed without offering the missing NLLB model"
 
 
 def test_dashboard_uses_live_trans_native_window_icons(panel):
@@ -388,3 +614,36 @@ def test_live_does_not_start_if_visible_controls_cannot_be_excluded(panel, monke
     overlay.hide.assert_called()
     assert dashboard.auto_switch.get() == 0
     assert "capture exclusion unavailable" in dashboard.status_label.cget("text")
+
+def test_qwen_rule_manager_saves_slots_and_applies_selected_snapshot(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from core.qwen_rules import load_rule_slots
+    from frontend import ocr_settings_window, ui
+
+    dashboard, session, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings(flow="direct"))
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    dialog.advanced_button.invoke()
+    dialog.manage_rules_button.invoke()
+    manager = dialog._rules_window
+    manager.name_text.set("My rule")
+    manager.rule_text.insert("1.0", "Use concise wording")
+    manager.save_button.invoke()
+    assert load_rule_slots(tmp_path)[0].text == "Use concise wording"
+    assert OCRSettings.load(tmp_path).qwen_rule is None
+    manager.name_text.set("Renamed")
+    manager.save_button.invoke()
+    assert load_rule_slots(tmp_path)[0].name == "Renamed"
+    assert "Renamed" in manager.heading.cget("text")
+    assert "Đã lưu" in manager.status.cget("text")
+    manager._select_slot(manager.no_rule_label)
+    assert dialog._selection().qwen_rule is None
+    manager._select_slot(manager.slot_labels[0])
+    manager.destroy()
+    assert dialog.grab_current() == dialog
+    dialog.save_button.invoke()
+    assert OCRSettings.load(tmp_path).qwen_rule == load_rule_slots(tmp_path)[0]
+    assert dashboard._ocr_settings.qwen_rule == load_rule_slots(tmp_path)[0]

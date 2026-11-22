@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from math import ceil, floor
 import os
 from pathlib import Path
@@ -9,12 +10,13 @@ import sys
 
 from live_models import _is_translation_batch, read_packet, write_packet
 from live_translator import load_translator
+from core.ocr_settings import DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_PIVOT, QWEN_4B, QWEN_CONTEXT_DEFAULT, OCRSettings, ocr_model_key
 from core.setup_models import resolve_model
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_ocr():
+def _load_ocr(settings: OCRSettings = OCRSettings()):
     try:
         import cv2
         import torch
@@ -24,15 +26,15 @@ def _load_ocr():
 
     cv2.setNumThreads(4)
     torch.set_num_threads(4)
-    detection = "PP-OCRv6_small_det"
-    recognition = "PP-OCRv6_small_rec"
+    detection = f"PP-OCRv6_{settings.det}_det"
+    recognition = f"PP-OCRv6_{settings.rec}_rec"
     use_cuda = torch.cuda.is_available()
     ocr = PaddleOCR(
         device="gpu:0" if use_cuda else "cpu",
         text_detection_model_name=detection,
-        text_detection_model_dir=resolve_model(_ROOT, "live-ocr-det"),
+        text_detection_model_dir=resolve_model(_ROOT, ocr_model_key("det", settings.det)),
         text_recognition_model_name=recognition,
-        text_recognition_model_dir=resolve_model(_ROOT, "live-ocr-rec"),
+        text_recognition_model_dir=resolve_model(_ROOT, ocr_model_key("rec", settings.rec)),
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
@@ -90,7 +92,33 @@ def _recognize(ocr, frame):
     return rows
 
 
+def _load_translation(request, resources):
+    settings = OCRSettings(
+        ja_model=request.get("ja_model", DEFAULT_JA_MODEL),
+        flow=request.get("flow", FLOW_PIVOT),
+        qwen_context=request.get("qwen_context", QWEN_CONTEXT_DEFAULT),
+        qwen_model=request.get("qwen_model", QWEN_4B),
+    )
+    if settings.flow != FLOW_DIRECT:
+        return load_translator(settings.ja_model)
+
+    from core.live_qwen import QwenTranslator
+    from core.setup_models import qwen_model_path, qwen_server_path
+
+    translator = QwenTranslator(
+        qwen_model_path(_ROOT, settings.qwen_model), qwen_server_path(_ROOT), settings.qwen_context,
+        rules=request.get("qwen_rules", ""),
+    )
+    resources.callback(translator.close)
+    return translator
+
+
 def serve(input_stream, output_stream):
+    with ExitStack() as resources:
+        _serve(input_stream, output_stream, resources)
+
+
+def _serve(input_stream, output_stream, resources):
     ocr = None
     translator = None
     while (packet := read_packet(input_stream)) is not None:
@@ -100,14 +128,14 @@ def serve(input_stream, output_stream):
             if operation == "ocr":
                 frame = _decode_frame(request, binary)
                 if ocr is None:
-                    ocr = _load_ocr()
+                    ocr = _load_ocr(OCRSettings(request.get("det", "small"), request.get("rec", "small")))
                 result = _recognize(ocr, frame)
             elif operation == "translate":
                 texts = request.get("texts")
                 if binary or not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
                     raise ValueError("Live translation expects a list of strings")
                 if translator is None:
-                    translator = load_translator()
+                    translator = _load_translation(request, resources)
                 result = translator(texts)
                 if not _is_translation_batch(result, len(texts)):
                     raise ValueError("The live translator must return one string per input")

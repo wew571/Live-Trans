@@ -52,6 +52,118 @@ def test_live_worker_skips_provider_probes_when_loading_local_weights(monkeypatc
     assert _worker_environment()[flag] == "True"
 
 
+def test_qwen_preset_round_trips_and_existing_settings_stay_on_the_pivot(tmp_path):
+    from core.ocr_settings import OCRSettings, PRESETS
+
+    assert list(PRESETS) == ["Flash", "Medium", "High", "XHigh"]
+    assert {
+        name: (preset.det, preset.rec, preset.ja_model, preset.flow, preset.qwen_model)
+        for name, preset in PRESETS.items()
+    } == {
+        "Flash": ("small", "small", "mitsua", "pivot", "4b"),
+        "Medium": ("medium", "small", "nllb", "pivot", "4b"),
+        "High": ("medium", "medium", "mitsua", "direct", "2b"),
+        "XHigh": ("medium", "medium", "mitsua", "direct", "4b"),
+    }
+    file = OCRSettings._path(tmp_path)
+    file.parent.mkdir(parents=True)
+    file.write_text('{"det":"medium","rec":"medium","ja_model":"nllb"}', encoding="utf-8")
+    legacy_pivot = OCRSettings.load(tmp_path)
+    assert legacy_pivot == OCRSettings("medium", "medium", "nllb")
+    assert legacy_pivot.preset is None
+    file.write_text('{"det":"medium","rec":"medium","flow":"direct"}', encoding="utf-8")
+    assert OCRSettings.load(tmp_path) == PRESETS["XHigh"]
+    direct = OCRSettings("medium", "medium", "nllb", "direct", 25000)
+    direct.save(tmp_path)
+    assert OCRSettings.load(tmp_path) == direct
+    assert direct.preset == "XHigh"
+    PRESETS["High"].save(tmp_path)
+    assert OCRSettings.load(tmp_path).preset == "High"
+    assert OCRSettings("small", "medium", flow="direct").preset is None
+    assert PRESETS["XHigh"].qwen_context == 3000
+    for invalid in (999, 25001, True, "3000"):
+        with pytest.raises(ValueError):
+            OCRSettings(flow="direct", qwen_context=invalid)
+
+
+@pytest.mark.parametrize("variant", ["2b", "4b"])
+def test_worker_routes_both_languages_directly_to_qwen(monkeypatch, tmp_path, client_type, child_modules, variant):
+    from core import live_models
+    from core.ocr_settings import OCRSettings
+    from core.qwen_rules import save_rule_slot
+
+    child_modules("qwen_worker", f"""
+        import sys
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        sys.path.insert(0, str(Path.cwd() / "core"))
+        import live_inference_worker
+        from core import setup_models
+
+        class FakeQwen:
+            def __init__(self, model, server, context_size, *, rules):
+                assert model == Path("test-{variant}.gguf")
+                assert server == Path("llama-server.exe")
+                assert context_size == 5200
+                assert rules == "Giữ tên riêng."
+
+            def __call__(self, texts):
+                assert texts == ["設定", "Continue", "一行目\\n二行目"]
+                return ["Cài đặt", "Tiếp tục", "Dòng một và hai"]
+
+            def close(self):
+                pass
+
+        def unexpected_pivot(*args, **kwargs):
+            raise AssertionError("Direct mode called a pivot model")
+
+        live_inference_worker.load_translator = unexpected_pivot
+        setup_models.qwen_model_path = lambda root, variant: Path("test-" + variant + ".gguf")
+        setup_models.qwen_server_path = lambda root: Path("llama-server.exe")
+        sys.modules["core.live_qwen"] = SimpleNamespace(QwenTranslator=FakeQwen)
+        live_inference_worker.main()
+    """)
+    monkeypatch.setattr(live_models, "_WORKER", tmp_path / "qwen_worker.py")
+    rule = save_rule_slot(tmp_path, name="Dialogue", text="Giữ tên riêng.")
+    client = client_type(ocr_settings=OCRSettings(
+        flow="direct", qwen_context=5200, qwen_rule=rule, qwen_model=variant,
+    ))
+    try:
+        assert client.translate(["設定", "Continue", "一行目\n二行目"]) == [
+            "Cài đặt", "Tiếp tục", "Dòng một và hai",
+        ]
+    finally:
+        client.close()
+
+
+def test_direct_dialogue_keeps_wrapped_lines_together_without_joining_columns():
+    from collections import OrderedDict
+
+    from core.live_translation import LiveTranslationSession, _group_dialogue_lines
+
+    detected = [
+        ((220, 12, 340, 32), "Separate column"),
+        ((10, 36, 170, 56), "来なかった。"),
+        ((10, 12, 150, 32), "彼は"),
+        ((10, 140, 170, 160), "別の段落"),
+    ]
+    grouped = _group_dialogue_lines(detected)
+    assert grouped == [
+        ((10, 12, 170, 56), "彼は\n来なかった。"),
+        ((220, 12, 340, 32), "Separate column"),
+        ((10, 140, 170, 160), "別の段落"),
+    ]
+    requests = []
+    cache = OrderedDict()
+    models = SimpleNamespace(translate=lambda texts: requests.append(texts) or ["Dịch"] * len(texts))
+    lines = LiveTranslationSession._translate(models, grouped, cache, preserve_line_breaks=True)
+    assert lines[0].box == (10, 12, 170, 56)
+    assert requests == [["彼は\n来なかった。", "Separate column", "別の段落"]]
+    assert LiveTranslationSession._translate(models, grouped, cache, preserve_line_breaks=True) == lines
+    assert len(requests) == 1
+
+
 @pytest.fixture
 def worker_translator(child_modules, tmp_path, monkeypatch):
     from core import live_models
@@ -64,7 +176,7 @@ def worker_translator(child_modules, tmp_path, monkeypatch):
         import live_inference_worker
         from test_translator import build
 
-        live_inference_worker.load_translator = build
+        live_inference_worker.load_translator = lambda ja_model: build()
         live_inference_worker.main()
     """)
     monkeypatch.setattr(live_models, "_WORKER", tmp_path / "test_worker.py")
@@ -138,7 +250,10 @@ def test_live_routes_japanese_lines_and_preserves_mixed_batch_order(monkeypatch)
     assert loads == ["VinAI", "Mitsua"]
 
 
-def test_worker_uses_fixed_model_weights_and_tokenizers(monkeypatch, client_type, child_modules):
+@pytest.mark.parametrize("ja_model", [None, "nllb"])
+def test_worker_uses_fixed_model_weights_and_tokenizers(monkeypatch, client_type, child_modules, ja_model):
+    from core.ocr_settings import OCRSettings
+
     child_modules("torch", """
         from contextlib import nullcontext
 
@@ -164,19 +279,28 @@ def test_worker_uses_fixed_model_weights_and_tokenizers(monkeypatch, client_type
 
             @classmethod
             def from_pretrained(cls, name, **kwargs):
+                tokenizer = cls()
                 if 'Mitsua' in name:
                     assert 'elan-mt-bt-ja-en' in name and 'src_lang' not in kwargs
+                elif 'nllb-200-distilled-600M' in name:
+                    assert kwargs['src_lang'] == 'jpn_Jpan'
+                    tokenizer.is_nllb = True
                 else:
                     assert 'vinai-translate-en2vi-v2' in name
                     assert kwargs['src_lang'] == 'en_XX'
-                return cls()
+                return tokenizer
 
             def convert_tokens_to_ids(self, language):
+                if getattr(self, 'is_nllb', False):
+                    assert language == 'eng_Latn'
+                    return 42
                 assert language == 'vi_VN'
                 return 17
 
             def __call__(self, texts, **kwargs):
                 assert kwargs['padding'] is True
+                if getattr(self, 'is_nllb', False):
+                    assert kwargs['max_length'] == 512
                 return Inputs(texts=texts)
 
             def batch_decode(self, output, skip_special_tokens):
@@ -189,9 +313,13 @@ def test_worker_uses_fixed_model_weights_and_tokenizers(monkeypatch, client_type
 
             @classmethod
             def from_pretrained(cls, name, **kwargs):
-                assert 'elan-mt-bt-ja-en' in name or 'vinai-translate-en2vi-v2' in name
+                assert any(id in name for id in (
+                    'elan-mt-bt-ja-en', 'vinai-translate-en2vi-v2', 'nllb-200-distilled-600M',
+                ))
                 assert kwargs['dtype'] == 'torch.float32'
-                return cls()
+                model = cls()
+                model.is_nllb = 'nllb-200-distilled-600M' in name
+                return model
 
             def eval(self):
                 return self
@@ -200,8 +328,13 @@ def test_worker_uses_fixed_model_weights_and_tokenizers(monkeypatch, client_type
                 assert device == 'cpu'
                 return self
 
-            def generate(self, *, texts, num_beams, do_sample, decoder_start_token_id=None, **kwargs):
+            def generate(self, *, texts, num_beams, do_sample, decoder_start_token_id=None,
+                         forced_bos_token_id=None, **kwargs):
                 assert num_beams == 1 and do_sample is False
+                if self.is_nllb:
+                    assert forced_bos_token_id == 42 and decoder_start_token_id is None
+                    assert texts == ['いち', 'に']
+                    return ['NLLB one', 'NLLB two']
                 if decoder_start_token_id is None:
                     assert texts == ['いち', 'に']
                     return ['one', 'two']
@@ -213,9 +346,13 @@ def test_worker_uses_fixed_model_weights_and_tokenizers(monkeypatch, client_type
     monkeypatch.setenv("MANGALENS_LIVE_TRANSLATOR_MODEL", "example/english-vietnamese")
     monkeypatch.setenv("en_vi_weight", "manga/original-weights")
     monkeypatch.setenv("en_vi_token", "manga/original-tokenizer")
-    client = client_type()
+    client = client_type(ocr_settings=OCRSettings(ja_model=ja_model)) if ja_model else client_type()
     try:
-        assert client.translate(["いち", "Ignore", "に"]) == ["dịch one", "dịch Ignore", "dịch two"]
+        assert client.translate(["Ignore"]) == ["dịch Ignore"]
+        expected = ["dịch NLLB one", "dịch Ignore", "dịch NLLB two"] if ja_model else [
+            "dịch one", "dịch Ignore", "dịch two",
+        ]
+        assert client.translate(["いち", "Ignore", "に"]) == expected
     finally:
         client.close()
 
@@ -350,7 +487,10 @@ def test_live_mbart_selects_complete_fp16_checkpoint_on_cuda(
         assert moves == [device]
 
 
-def test_ocr_sends_noncontiguous_bgr_and_clips_local_boxes(client_type, child_modules):
+@pytest.mark.parametrize("det,rec", [("small", "small"), ("medium", "small"), ("small", "medium"), ("medium", "medium")])
+def test_ocr_sends_noncontiguous_bgr_and_clips_local_boxes(client_type, child_modules, det, rec):
+    from core.ocr_settings import OCRSettings
+
     child_modules("cv2", """
         def setNumThreads(threads):
             assert threads == 4
@@ -370,8 +510,10 @@ def test_ocr_sends_noncontiguous_bgr_and_clips_local_boxes(client_type, child_mo
                 assert kwargs['device'] == 'cpu'
                 assert kwargs['engine'] == 'transformers'
                 assert kwargs['engine_config']['dtype'] == 'float32'
-                assert kwargs['text_detection_model_name'] == 'PP-OCRv6_small_det'
-                assert kwargs['text_recognition_model_name'] == 'PP-OCRv6_small_rec'
+                assert kwargs['text_detection_model_name'] == 'PP-OCRv6_DET_SIZE_det'
+                assert kwargs['text_recognition_model_name'] == 'PP-OCRv6_REC_SIZE_rec'
+                assert kwargs['text_detection_model_dir'].endswith('PP-OCRv6_DET_SIZE_det_safetensors')
+                assert kwargs['text_recognition_model_dir'].endswith('PP-OCRv6_REC_SIZE_rec_safetensors')
 
             def predict(self, frame, **kwargs):
                 assert kwargs == {'text_det_limit_side_len': 960, 'text_det_limit_type': 'max'}
@@ -385,10 +527,10 @@ def test_ocr_sends_noncontiguous_bgr_and_clips_local_boxes(client_type, child_mo
                         [[8, 8], [9, 8], [9, 9], [8, 9]],
                     ],
                 }]
-    """)
+    """.replace("DET_SIZE", det).replace("REC_SIZE", rec))
     source = np.zeros((4, 10, 3), dtype=np.uint8)
     source[1, 2] = (19, 23, 29)
-    client = client_type()
+    client = client_type(ocr_settings=OCRSettings(det, rec))
     try:
         assert client.ocr(source[:, ::2]) == [((0, 0, 5, 4), "hello")]
     finally:

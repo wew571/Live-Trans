@@ -41,7 +41,7 @@ def main() -> int:
     from core.setup_models import model_items
     from frontend.setup_window import run_setup
 
-    if not run_setup([*library_items(root), *model_items(root)]):
+    if not run_setup([*library_items(root), *model_items(root, include_optional=True)]):
         return 0
     return _launch_application(root)
 

@@ -44,7 +44,9 @@ def test_main_only_loads_control_panel_when_setup_succeeds(monkeypatch, ready):
         "core.setup_libraries": SimpleNamespace(
             library_items=lambda path: ["library"], opencv_install_conflicts=lambda: [],
         ),
-        "core.setup_models": SimpleNamespace(model_items=lambda path: ["model"]),
+        "core.setup_models": SimpleNamespace(
+            model_items=lambda path, *, include_optional: ["model"] if include_optional else [],
+        ),
         "frontend.setup_window": SimpleNamespace(
             run_setup=lambda items: events.append(list(items)) or ready,
         ),

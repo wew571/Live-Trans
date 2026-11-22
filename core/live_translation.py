@@ -93,6 +93,38 @@ def _open_desktop():
         yield _MssCapture(desktop)
 
 
+def _group_dialogue_lines(detected: list[tuple[Box, str]]) -> list[tuple[Box, str]]:
+    """Keep neighboring subtitle lines together without combining separate columns."""
+    groups = []
+    for box, text in sorted(detected, key=lambda item: (item[0][1], item[0][0])):
+        left, top, right, bottom = box
+        height = bottom - top
+        for group in reversed(groups):
+            previous, _ = group[-1]
+            other_left, other_top, other_right, other_bottom = previous
+            other_height = other_bottom - other_top
+            overlap = min(right, other_right) - max(left, other_left)
+            if (
+                len(group) < 3
+                and -0.2 * height <= top - other_bottom <= 0.55 * min(height, other_height)
+                and max(height, other_height) <= 1.5 * min(height, other_height)
+                and overlap >= 0.5 * min(right - left, other_right - other_left)
+            ):
+                group.append((box, text))
+                break
+        else:
+            groups.append([(box, text)])
+
+    return [
+        (
+            (min(box[0] for box, _ in group), group[0][0][1],
+             max(box[2] for box, _ in group), max(box[3] for box, _ in group)),
+            "\n".join(text for _, text in group),
+        )
+        for group in groups
+    ]
+
+
 class LiveTranslationSession:
     """A latest-frame pipeline. Only ``poll()`` delivers updates to the UI."""
 
@@ -103,6 +135,7 @@ class LiveTranslationSession:
         capture_fps: float = 30,
         capture_factory: Callable[[], AbstractContextManager[_Capture]] | None = None,
         frame_crop: WindowCrop | None = None,
+        group_dialogue: bool = False,
     ):
         if not isfinite(capture_fps) or capture_fps <= 0:
             raise ValueError('capture_fps must be finite and positive')
@@ -110,6 +143,7 @@ class LiveTranslationSession:
         self._model_factory = model_factory
         self._capture_factory = capture_factory if capture_factory is not None else _open_desktop
         self._frame_crop = frame_crop
+        self._group_dialogue = group_dialogue
         self._state = Condition()
         self._closed = False
         self._generation = 0
@@ -256,7 +290,9 @@ class LiveTranslationSession:
                 with self._state:
                     if generation != self._generation:
                         continue
-                lines = self._translate(models, detected, cache)
+                if self._group_dialogue:
+                    detected = _group_dialogue_lines(detected)
+                lines = self._translate(models, detected, cache, preserve_line_breaks=self._group_dialogue)
             except Exception as error:
                 self._fail(generation, region, 'Live inference failed', error)
                 with self._state:
@@ -272,13 +308,25 @@ class LiveTranslationSession:
                     self._update = LiveUpdate(region, lines)
 
     @staticmethod
-    def _translate(models: _Models, detected: list[tuple[Box, str]], cache: OrderedDict[str, str]):
+    def _translate(
+        models: _Models,
+        detected: list[tuple[Box, str]],
+        cache: OrderedDict[str, str],
+        *,
+        preserve_line_breaks: bool = False,
+    ):
         entries = []
         translations = {}
         missing = {}
         for box, source in detected:
-            text = ' '.join(normalize('NFC', source).split())
+            normalized = normalize('NFC', source)
+            if preserve_line_breaks:
+                text = '\n'.join(' '.join(line.split()) for line in normalized.splitlines() if line.strip())
+            else:
+                text = ' '.join(normalized.split())
             if not any(character.isalpha() for character in text):
+                continue
+            if sum(character.isalnum() for character in text) < 2:
                 continue
             entries.append((box, source, text))
             if text in cache:

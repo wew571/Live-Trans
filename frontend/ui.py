@@ -1,4 +1,6 @@
 import os
+from functools import partial
+from pathlib import Path
 import queue
 import tkinter as tk
 import customtkinter as ctk
@@ -11,12 +13,16 @@ from win32gui import error as Win32Error
 from core import configure_runtime
 from core.config import APP_ICON_PATH, APP_NAME, ASSETS_DIR
 from core.live_translation import WindowCrop
+from core.ocr_settings import FLOW_DIRECT
+from core.setup_models import available_model_settings, model_items
 from core.window_capture import list_windows, open_window_capture
 from frontend.live_overlay import LiveOverlay, RegionPicker, primary_screen_region, set_capture_exclusion
+from frontend.ocr_settings_window import OCRSettingsWindow
 from frontend.windows_shell import set_process_app_id, set_taskbar_window
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+_ROOT = Path(__file__).resolve().parents[1]
 
 # Từ điển hỗ trợ đa ngôn ngữ
 LANG_TEXTS = {
@@ -24,6 +30,8 @@ LANG_TEXTS = {
         "sub_logo": "Trình dịch Desktop",
         "btn_area": " Chọn vùng",
         "btn_clear": " Xóa đè",
+        "btn_settings": " Cài đặt",
+        "btn_setup": "Thiết lập",
         "btn_quit": " Đóng ứng dụng",
         "status_title": "TRẠNG THÁI",
         "auto_title": "TỰ ĐỘNG DỊCH",
@@ -51,6 +59,7 @@ LANG_TEXTS = {
         "status_live_waiting": "Đang nhận dạng văn bản…",
         "status_live_running": "Đang dịch trực tiếp",
         "status_live_error": "Lỗi dịch trực tiếp",
+        "status_missing_models": "Mở Thiết lập để tải các mục còn thiếu",
         "pick_area": "Kéo để chọn vùng dịch",
         "btn_cancel": "Hủy",
     },
@@ -58,6 +67,8 @@ LANG_TEXTS = {
         "sub_logo": "Desktop Translator",
         "btn_area": " Select Area",
         "btn_clear": " Clear Overlay",
+        "btn_settings": " Settings",
+        "btn_setup": "Setup",
         "btn_quit": " Quit Application",
         "status_title": "STATUS",
         "auto_title": "AUTO TRANSLATE",
@@ -85,6 +96,7 @@ LANG_TEXTS = {
         "status_live_waiting": "Looking for text…",
         "status_live_running": "Translating live",
         "status_live_error": "Live translation error",
+        "status_missing_models": "Open Setup to install the missing items",
         "pick_area": "Drag to select a translation area",
         "btn_cancel": "Cancel",
     }
@@ -209,6 +221,8 @@ class ControlPanel(ctk.CTk):
         self._ui_actions = queue.SimpleQueue()
         self._status = ("status_ready", "#a6e3a1", "")
         self.floating_widget = None
+        self._ocr_settings = available_model_settings(_ROOT)
+        self._settings_window = None
         self._live_session_factory = live_session_factory or self._create_live_session
         self._live_overlay_factory = live_overlay_factory
         self._live_session = None
@@ -231,8 +245,7 @@ class ControlPanel(ctk.CTk):
         self._translation_hotkey = keyboard.add_hotkey("`", lambda: self.post_ui(self.trigger_scan))
         self._poll_id = self.after(33, self._poll_activity)
 
-    @staticmethod
-    def _create_live_session(*, capture_factory=None, frame_crop=None):
+    def _create_live_session(self, *, capture_factory=None, frame_crop=None):
         from core.live_models import LiveModelClient
         from core.live_translation import LiveTranslationSession
 
@@ -240,13 +253,33 @@ class ControlPanel(ctk.CTk):
         if fps not in {"30", "60"}:
             raise ValueError("MANGALENS_LIVE_CAPTURE_FPS must be 30 or 60.")
         return LiveTranslationSession(
-            LiveModelClient, capture_fps=int(fps), capture_factory=capture_factory, frame_crop=frame_crop,
+            partial(LiveModelClient, ocr_settings=self._ocr_settings), capture_fps=int(fps),
+            capture_factory=capture_factory, frame_crop=frame_crop,
+            group_dialogue=self._ocr_settings.flow == FLOW_DIRECT,
         )
 
     def _create_window_live_session(self, target):
         return self._create_live_session(
             capture_factory=lambda: open_window_capture(target.hwnd), frame_crop=self._live_window_crop,
         )
+
+    def _open_ocr_settings(self):
+        if self._settings_window is not None and self._settings_window.winfo_exists():
+            self._settings_window.focus_set()
+            return
+        self._settings_window = OCRSettingsWindow(
+            self, _ROOT, self._ocr_settings, self.current_lang, self._apply_ocr_settings,
+        )
+
+    def _apply_ocr_settings(self, settings):
+        self._stop_live()
+        self._close_live_session()
+        self._ocr_settings = settings
+
+    def _open_model_setup(self):
+        from frontend.setup_window import run_setup
+
+        run_setup(model_items(_ROOT, include_optional=True), parent=self)
 
     def post_ui(self, action):
         """Queue a UI action without entering Tcl from a worker or keyboard hook."""
@@ -364,6 +397,24 @@ class ControlPanel(ctk.CTk):
             command=self.clear_screen,
         )
         self.btn_clear.pack(pady=5, padx=15, fill="x")
+
+        with Image.open(ASSETS_DIR / "settings.png") as asset:
+            settings_icon = ctk.CTkImage(asset.copy(), size=(19, 19))
+        self.btn_settings = ctk.CTkButton(
+            self.sidebar_frame, image=settings_icon, compound="left",
+            text=LANG_TEXTS[self.current_lang]["btn_settings"],
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color="#313244", text_color="#cdd6f4", hover_color="#45475a", height=32,
+            command=self._open_ocr_settings,
+        )
+        self.btn_settings.pack(pady=5, padx=15, fill="x")
+        self.btn_setup = ctk.CTkButton(
+            self.sidebar_frame, text=LANG_TEXTS[self.current_lang]["btn_setup"],
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color="#313244", text_color="#cdd6f4", hover_color="#45475a", height=32,
+            command=self._open_model_setup,
+        )
+        self.btn_setup.pack(pady=5, padx=15, fill="x")
 
         self.btn_quit = ctk.CTkButton(
             self.sidebar_frame,
@@ -591,6 +642,8 @@ class ControlPanel(ctk.CTk):
         self.sub_logo.configure(text=texts["sub_logo"])
         self.btn_area.configure(text=texts["btn_area"])
         self.btn_clear.configure(text=texts["btn_clear"])
+        self.btn_settings.configure(text=texts["btn_settings"])
+        self.btn_setup.configure(text=texts["btn_setup"])
         self.btn_quit.configure(text=texts["btn_quit"])
         self.btn_fullscreen.configure(text=texts["btn_fullscreen"])
 
@@ -755,6 +808,12 @@ class ControlPanel(ctk.CTk):
         if self._live_region is not None or self._picker is not None:
             self._set_monitor(self._live_region is not None)
             return
+        if self._ocr_settings.flow == FLOW_DIRECT:
+            missing = [item.label for item in model_items(_ROOT, self._ocr_settings) if not item.is_ready()]
+            if missing:
+                self._set_monitor(False)
+                self._set_status("status_missing_models", "#f9e2af", ", ".join(missing))
+                return
         window_mode = self._live_capture_mode == "window"
         overlay_visible = True
         if window_mode and self._live_window is None:

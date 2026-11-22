@@ -126,6 +126,48 @@ def test_complete_launch_scans_all_items_and_does_not_install(drive_window):
     assert installed == []
 
 
+def test_startup_can_continue_after_required_install_without_downloading_addons(drive_window):
+    from dataclasses import replace
+
+    installed = set()
+    base = item("OCR Small", "model", lambda: "Small" in installed, lambda _: installed.add("Small"))
+    addon = replace(item("OCR Medium", "model", lambda: False, lambda _: installed.add("Medium")),
+                    optional=True)
+
+    def check_groups(root):
+        if not (find(root, ttk.Checkbutton, "OCR Medium") and find(root, ttk.Label, "Mô hình bổ sung")):
+            return False
+        assert not press("Tiếp tục")(root)
+        return True
+
+    assert drive_window([base, addon], [check_groups, press("OCR Small", ttk.Checkbutton),
+                                       press("Cài mô hình đã chọn"), press("Tiếp tục")])
+    assert installed == {"Small"}
+
+
+def test_only_missing_addons_do_not_reopen_setup_on_launch(drive_window):
+    from dataclasses import replace
+
+    optional = replace(item("NLLB", "model", lambda: False, lambda _: pytest.fail("unexpected download")),
+                       optional=True)
+    assert drive_window([optional]) is True
+
+
+def test_confirmed_model_install_uses_modal_and_restores_parent_grab(setup_window):
+    root = tk.Tk()
+    try:
+        settings = tk.Toplevel(root)
+        settings.grab_set()
+        installed = []
+        nllb = item("NLLB", "model", lambda: bool(installed), lambda _: installed.append("NLLB"))
+        root.after(5000, lambda: [close(window) for window in settings.winfo_children()])
+        assert setup_window.run_setup([nllb], parent=settings, install_now=True)
+        assert installed == ["NLLB"]
+        assert root.grab_current() == settings
+    finally:
+        root.destroy()
+
+
 def test_install_stays_in_the_selected_group_until_user_starts_the_other(drive_window):
     installed = set()
     items = [

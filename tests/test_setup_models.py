@@ -44,6 +44,112 @@ def test_default_inventory_and_scan_stay_offline(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_startup_lists_addons_separately_from_required_models(tmp_path, monkeypatch):
+    from core.setup_models import model_items
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    items = model_items(tmp_path, include_optional=True)
+    assert {item.key for item in items if item.optional} == {
+        "translate-ja-en-nllb", "live-ocr-medium-det", "live-ocr-medium-rec",
+        "live-translate-qwen", "live-translate-qwen-2b", "live-qwen-runtime",
+    }
+    assert {item.key for item in items if not item.optional} == {
+        "translate-ja-en", "live-translate-en-vi", "live-ocr-det", "live-ocr-rec",
+    }
+
+
+def test_direct_inventory_requires_qwen_and_its_runtime_instead_of_pivot_models(tmp_path):
+    from core.ocr_settings import PRESETS
+    from core.setup_models import available_model_settings, model_items
+
+    settings = PRESETS["XHigh"]
+    settings.save(tmp_path)
+    direct = {"live-ocr-medium-det", "live-ocr-medium-rec", "live-translate-qwen", "live-qwen-runtime"}
+    assert {item.key for item in model_items(tmp_path, settings)} == direct
+    startup = model_items(tmp_path, include_optional=True)
+    assert {item.key for item in startup if not item.optional} == direct
+    assert available_model_settings(tmp_path) == settings
+
+
+
+@pytest.mark.parametrize("variant,key,filename", [
+    ("2b", "live-translate-qwen-2b", "Qwen3.5-2B-Q4_K_M.gguf"),
+    ("4b", "live-translate-qwen", "Qwen3.5-4B-Q4_K_M.gguf"),
+])
+def test_direct_inventory_selects_only_requested_qwen_variant(tmp_path, variant, key, filename):
+    from dataclasses import replace
+    from core.ocr_settings import PRESETS
+    from core.setup_models import model_items, qwen_model_path
+
+    settings = replace(PRESETS["XHigh"], qwen_model=variant)
+    selected = model_items(tmp_path, settings)
+    assert {item.key for item in selected if item.key.startswith("live-translate-qwen")} == {key}
+    all_items = model_items(tmp_path, settings, include_optional=True)
+    qwen = {item.key: item for item in all_items if item.key.startswith("live-translate-qwen")}
+    assert set(qwen) == {"live-translate-qwen", "live-translate-qwen-2b"}
+    assert not qwen[key].optional
+    assert all(item.optional for other, item in qwen.items() if other != key)
+    assert qwen_model_path(tmp_path, variant) == tmp_path / "model" / filename
+
+
+def test_qwen_runtime_installs_from_verified_zip_and_detects_missing_dll(tmp_path, monkeypatch):
+    from zipfile import ZipFile
+
+    from core import setup_models
+
+    archive = setup_models._qwen_runtime_archive(tmp_path)
+    archive.parent.mkdir(parents=True)
+    with ZipFile(archive, "w") as bundle:
+        for name in setup_models._RUNTIME_REQUIRED:
+            bundle.writestr(name, b"binary data")
+        bundle.writestr("../outside.exe", b"unused and outside the runtime directory")
+    monkeypatch.setattr(
+        setup_models, "_QWEN_RUNTIME_ASSET",
+        setup_models._RemoteFile(archive.stat().st_size, sha256(archive.read_bytes()).hexdigest()),
+    )
+    inventory = {item.key: item for item in setup_models.model_items(tmp_path, include_optional=True)}
+    runtime = inventory["live-qwen-runtime"]
+    assert not runtime.is_ready()
+    runtime.install(lambda _completed, _total: None)
+    assert runtime.is_ready()
+    assert not (setup_models.qwen_server_path(tmp_path).parent.parent / "outside.exe").exists()
+    setup_models.qwen_server_path(tmp_path).with_name("ggml-vulkan.dll").unlink()
+    assert not runtime.is_ready()
+
+
+def test_missing_saved_addons_fall_back_without_overwriting_saved_selection(tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from core.setup_models import available_model_settings
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    saved = OCRSettings("medium", "medium", "nllb")
+    saved.save(tmp_path)
+    installed = tmp_path / "models" / "live-ocr" / "PP-OCRv6_medium_det_safetensors"
+    for name in ("config.json", "preprocessor_config.json", "inference.yml", "model.safetensors"):
+        _asset(installed / name, b"{}")
+    # The existing model tests cover the weight format. This case needs a valid tiny container.
+    header = b'{"weight":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}'
+    _asset(installed / "model.safetensors", len(header).to_bytes(8, "little") + header + b"\0\0")
+    assert available_model_settings(tmp_path) == OCRSettings("medium", "small", "mitsua")
+    assert OCRSettings.load(tmp_path) == saved
+
+
+def test_startup_scans_saved_combination_and_settings_can_scan_another(tmp_path):
+    from core.ocr_settings import OCRSettings
+    from core.setup_models import model_items, resolve_model
+
+    settings = OCRSettings("medium", "small")
+    settings.save(tmp_path)
+    assert OCRSettings.load(tmp_path) == settings
+    assert set(_items(tmp_path)) == {
+        "translate-ja-en", "live-translate-en-vi", "live-ocr-medium-det", "live-ocr-rec",
+    }
+    assert resolve_model(tmp_path, "live-ocr-medium-det").endswith("PP-OCRv6_medium_det_safetensors")
+    assert [item.key for item in model_items(tmp_path, OCRSettings("small", "medium")) if item.key.startswith("live-ocr")] == [
+        "live-ocr-det", "live-ocr-medium-rec",
+    ]
+
+
 def test_incomplete_cache_cannot_hide_full_existing_snapshot(tmp_path):
     from core.setup_models import resolve_model
 
@@ -57,6 +163,29 @@ def test_incomplete_cache_cannot_hide_full_existing_snapshot(tmp_path):
         _asset(snapshot / file, b"{}" if file.endswith(".json") else b"model data")
     assert _items(tmp_path)["translate-ja-en"].is_ready()
     assert resolve_model(tmp_path, "translate-ja-en") == str(snapshot)
+
+
+def test_saved_nllb_selection_scans_its_own_checkpoint(tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from core.setup_models import resolve_model
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    old_settings = tmp_path / "models" / "live-ocr" / "settings.json"
+    _asset(old_settings, b'{"det":"medium","rec":"small"}')
+    assert "translate-ja-en" in _items(tmp_path)
+
+    OCRSettings("medium", "small", "nllb").save(tmp_path)
+    key = "translate-ja-en-nllb"
+    source = "facebook/nllb-200-distilled-600M"
+    assert set(_items(tmp_path)) == {key, "live-translate-en-vi", "live-ocr-medium-det", "live-ocr-rec"}
+    assert resolve_model(tmp_path, key) == source
+    snapshot = tmp_path / "models" / "hub" / "models--facebook--nllb-200-distilled-600M" / "snapshots" / ("a" * 40)
+    _asset(snapshot / "config.json", b"{}")
+    _asset(snapshot / "pytorch_model.bin")
+    assert not _items(tmp_path)[key].is_ready()
+    _asset(snapshot / "tokenizer.json", b"{}")
+    assert _items(tmp_path)[key].is_ready()
+    assert resolve_model(tmp_path, key) == str(snapshot)
 
 
 def test_live_model_dir_needs_all_four_transformers_files(tmp_path):

@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 from unicodedata import normalize
 
+from core.ocr_settings import DEFAULT_JA_MODEL, JA_MODEL_KEYS
 from core.setup_models import _file_present, _index_shards, resolve_model
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -71,7 +72,8 @@ def _local_fp16_checkpoint(directory: str, model_id: str, tokenizer_id: str) -> 
 
 
 def _load_batched_seq2seq(
-    model_id, tokenizer, *, fp16_directory=None, tokenizer_id=None, **generation_options,
+    model_id, tokenizer, *, fp16_directory=None, tokenizer_id=None, input_limit=None,
+    **generation_options,
 ):
     import torch
     from transformers import AutoModelForSeq2SeqLM
@@ -92,6 +94,10 @@ def _load_batched_seq2seq(
             local_files_only=True, use_safetensors=True,
         ).eval()
 
+    max_length = model.config.max_position_embeddings
+    if input_limit is not None:
+        max_length = min(max_length, input_limit)
+
     def translate(texts: list[str]) -> list[str]:
         translations = []
         with torch.inference_mode():
@@ -101,7 +107,7 @@ def _load_batched_seq2seq(
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
-                    max_length=model.config.max_position_embeddings,
+                    max_length=max_length,
                 ).to(device)
                 outputs = model.generate(
                     **inputs,
@@ -134,9 +140,20 @@ def _load_mbart_translator():
 def _load_mitsua_translator():
     from transformers import AutoTokenizer
 
-    model_id = resolve_model(_ROOT, "translate-ja-en")
+    model_id = resolve_model(_ROOT, JA_MODEL_KEYS[DEFAULT_JA_MODEL])
     tokenizer = _from_pretrained(AutoTokenizer, model_id)
     return _load_batched_seq2seq(model_id, tokenizer)
+
+
+def _load_nllb_translator():
+    from transformers import AutoTokenizer
+
+    model_id = resolve_model(_ROOT, JA_MODEL_KEYS["nllb"])
+    tokenizer = _from_pretrained(AutoTokenizer, model_id, src_lang="jpn_Jpan")
+    english = tokenizer.convert_tokens_to_ids("eng_Latn")
+    if not isinstance(english, int) or english == tokenizer.unk_token_id:
+        raise ValueError("The selected NLLB tokenizer must define the eng_Latn target token")
+    return _load_batched_seq2seq(model_id, tokenizer, input_limit=512, forced_bos_token_id=english)
 
 
 def _translate_batch(translator, texts):
@@ -150,7 +167,8 @@ def _translate_batch(translator, texts):
     return translated
 
 
-def load_translator():
+def load_translator(ja_model=DEFAULT_JA_MODEL):
+    japanese_loader = {DEFAULT_JA_MODEL: _load_mitsua_translator, "nllb": _load_nllb_translator}[ja_model]
     ja_to_en = None
     en_to_vi = None
 
@@ -168,7 +186,7 @@ def load_translator():
 
         if japanese:
             if ja_to_en is None:
-                ja_to_en = _load_mitsua_translator()
+                ja_to_en = japanese_loader()
             pivot = _translate_batch(ja_to_en, list(japanese.values()))
             english.update(zip(japanese, pivot, strict=True))
 

@@ -48,8 +48,8 @@ py -3.12 main.py
 Trong cửa sổ **Thiết lập Live Trans**:
 
 1. Ở mục **Thư viện Python**, bấm **Chọn tất cả** rồi **Cài thư viện đã chọn**. Chờ quá trình cài hoàn tất.
-2. Ở mục **Mô hình**, bấm **Chọn tất cả** rồi **Cài mô hình đã chọn**. Chờ tải và kiểm tra xong.
-3. Cửa sổ chính tự mở khi mọi mục đã sẵn sàng. Nếu một mục hiển thị **Đã đầy đủ**, bạn có thể bỏ qua bước cài mục đó.
+2. Ở mục **Mô hình**, bấm **Chọn tất cả** rồi **Cài mô hình đã chọn**. Nhóm này gồm PP-OCRv6 Small (det và rec), Mitsua ElanMT và VinAI Translate v2.
+3. Mục **Mô hình bổ sung** cho phép cài PP-OCRv6 Medium det, PP-OCRv6 Medium rec, NLLB-200 Distilled 600M, các bản Qwen3.5 Q4_K_M (2B và 4B) và runtime llama.cpp dùng chung. Sau khi các mục bắt buộc sẵn sàng, bấm **Tiếp tục** để mở ứng dụng. Bạn có thể mở lại **Thiết lập** từ màn hình chính.
 
 Những lần sau, mở PowerShell tại thư mục dự án và chạy lại `py -3.12 main.py`.
 
@@ -69,6 +69,21 @@ Những lần sau, mở PowerShell tại thư mục dự án và chạy lại `p
 
 Phím backtick (`` ` ``) dùng để bắt đầu hoặc dừng dịch. Bấm **Xóa đè** để xóa phụ đề đang hiển thị hoặc **Hủy** để thoát thao tác chọn vùng.
 
+### Chọn mức dịch
+
+Trong **Cài đặt**, chọn mức bằng thanh trượt.
+
+- **Flash** dùng OCR Small cho cả det và rec, Mitsua ElanMT và VinAI Translate v2.
+- **Medium** dùng OCR Medium det và Small rec, NLLB-200 Distilled 600M và VinAI Translate v2.
+- **High** dùng OCR Medium cho cả det và rec, rồi dùng Qwen3.5-2B Q4_K_M để dịch trực tiếp cả tiếng Nhật lẫn tiếng Anh sang tiếng Việt.
+- **XHigh** dùng OCR Medium cho cả det và rec, rồi dùng Qwen3.5-4B Q4_K_M để dịch trực tiếp cả tiếng Nhật lẫn tiếng Anh sang tiếng Việt.
+
+Mục **Nâng cao** cho phép chọn riêng det, rec và model Nhật → Anh. Trong **Flash** và **Medium**, luồng Nhật → Anh → Việt được cố định, còn đầu vào tiếng Anh đi thẳng tới VinAI. **High** và **XHigh** dùng chung tùy chọn context từ **1.000 đến 25.000 token**, mặc định **3.000**, và cùng thư viện quy tắc. Context lớn hơn có thể cần thêm VRAM.
+
+Trong luồng Qwen, mở **Quản lý quy tắc** để lưu từng bộ quy tắc theo slot có tên. Chọn slot hoặc chọn **Không dùng quy tắc**, rồi bấm **Lưu** trong **Cài đặt** để áp dụng ở lần **Bắt đầu** tiếp theo. Các slot được lưu cục bộ trong `models/live-ocr/qwen-rules/`.
+
+Khi Cài đặt báo thiếu model hoặc runtime, đóng cửa sổ đó, mở **Thiết lập** từ màn hình chính rồi tải các mục được liệt kê. Quay lại **Cài đặt** để chọn và lưu mức. Nếu đang dịch, Live Trans dừng phiên hiện tại và dùng cấu hình đã lưu ở lần **Bắt đầu** tiếp theo.
+
 ## Ảnh minh họa
 
 Phụ đề tiếng Việt hiển thị trên lời thoại tiếng Nhật trong game.
@@ -79,15 +94,16 @@ Phụ đề tiếng Việt hiển thị trên lời thoại tiếng Nhật trong
 
 - **PowerShell báo không nhận lệnh `py`** — đóng và mở lại PowerShell sau khi cài Python. Nếu vẫn lỗi, chạy lại bộ cài Python để bật Python Launcher.
 - **Không tìm thấy `main.py`** — mở đúng thư mục đã giải nén rồi gõ `powershell` ở thanh địa chỉ. Bạn có thể dùng `Get-ChildItem main.py` để kiểm tra.
-- **Tải thư viện hoặc mô hình bị gián đoạn** — kiểm tra mạng và dung lượng ổ đĩa, sau đó bấm **Thử lại** trong cửa sổ thiết lập.
+- **Tải thư viện hoặc mô hình bị gián đoạn** — kiểm tra mạng và dung lượng ổ đĩa, sau đó dùng **Thử lại** trong cửa sổ thiết lập.
 - **Bản dịch đầu tiên xuất hiện chậm** — ứng dụng cần nạp mô hình. Thu hẹp vùng quét quanh phần chữ cần dịch để giảm lượng hình ảnh phải xử lý.
 - **Không thấy phụ đề ở chế độ cửa sổ** — khôi phục cửa sổ nguồn nếu đang thu nhỏ và đưa nó lên trước. Nếu bố cục thay đổi sau khi chỉnh kích thước, hãy chọn lại vùng.
 
 ## Mô hình và giới hạn
 
-1. **PP-OCRv6 Small** phát hiện vùng chữ và đọc nội dung trong ảnh. Live Trans tải riêng mô hình phát hiện và mô hình nhận dạng. [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
-2. **Mitsua ElanMT** dịch tiếng Nhật sang tiếng Anh. [Mitsua ElanMT trên Hugging Face](https://huggingface.co/Mitsua/elan-mt-bt-ja-en)
-3. **VinAI Translate v2** dịch tiếng Anh sang tiếng Việt. Văn bản tiếng Anh đi thẳng vào VinAI, còn văn bản tiếng Nhật đi qua Mitsua trước. [VinAI Translate v2 trên Hugging Face](https://huggingface.co/vinai/vinai-translate-en2vi-v2)
+1. **PP-OCRv6** phát hiện vùng chữ và đọc nội dung trong ảnh. Mặc định dùng Small cho cả hai bước. [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+2. **Mitsua ElanMT** hoặc **NLLB-200 Distilled 600M** dịch tiếng Nhật sang tiếng Anh. NLLB là lựa chọn bổ sung, tải khoảng 2,46 GB trọng số khi chưa có trong bộ nhớ đệm. Meta phát hành NLLB theo giấy phép **CC BY-NC 4.0** cho mục đích nghiên cứu. [Mitsua ElanMT](https://huggingface.co/Mitsua/elan-mt-bt-ja-en) · [NLLB-200 Distilled 600M](https://huggingface.co/facebook/nllb-200-distilled-600M)
+3. **VinAI Translate v2** dịch sang tiếng Việt từ văn bản tiếng Anh gốc hoặc từ kết quả Nhật → Anh của model đã chọn. [VinAI Translate v2 trên Hugging Face](https://huggingface.co/vinai/vinai-translate-en2vi-v2)
+4. **Qwen3.5 Q4_K_M** chạy cục bộ qua llama.cpp. Cả hai bản chỉ nhận text từ OCR và tắt thinking. App lưu trọng số GGUF riêng trong `model/`, khoảng 1,31 GB cho 2B và 3,03 GB cho 4B. [Bản 2B của SoAIHQ](https://huggingface.co/SoAIHQ/Qwen3.5-2B-GGUF) · [Bản 4B của ggml-org](https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF)
 
 Chữ nhỏ, phông cách điệu hoặc nền phức tạp có thể làm OCR đọc sai và ảnh hưởng đến bản dịch. Văn bản chỉ có chữ Hán có thể được nhận nhầm là tiếng Nhật. Tốc độ phụ thuộc vào phần cứng và vùng quét. Ứng dụng dùng GPU khi PyTorch nhận được CUDA tương thích.
 

@@ -13,6 +13,8 @@ import sys
 from threading import Lock, Thread
 from typing import TYPE_CHECKING
 
+from core.ocr_settings import FLOW_DIRECT, OCRSettings
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -82,8 +84,9 @@ class LiveModelClient:
     close() to interrupt a pending request and release the child process.
     """
 
-    def __init__(self, *, request_timeout: float = 180.0):
+    def __init__(self, *, request_timeout: float = 180.0, ocr_settings: OCRSettings = OCRSettings()):
         self._request_timeout = request_timeout
+        self._ocr_settings = ocr_settings
         self._lock = Lock()
         self._process = None
         self._closed = False
@@ -103,7 +106,10 @@ class LiveModelClient:
             raise ValueError("Live OCR frame exceeds the size limit")
         height, width = frame.shape[:2]
         binary = memoryview(np.ascontiguousarray(frame)).cast("B")
-        rows = self._request({"op": "ocr", "height": height, "width": width}, binary)
+        rows = self._request({
+            "op": "ocr", "height": height, "width": width,
+            "det": self._ocr_settings.det, "rec": self._ocr_settings.rec,
+        }, binary)
         if not isinstance(rows, list):
             self._invalid_response("invalid OCR result")
         result = []
@@ -132,7 +138,15 @@ class LiveModelClient:
                 if self._closed:
                     raise LiveModelError("Live model client is closed")
                 return []
-        result = self._request({"op": "translate", "texts": texts})
+        metadata = {"op": "translate", "texts": texts, "ja_model": self._ocr_settings.ja_model}
+        if self._ocr_settings.flow == FLOW_DIRECT:
+            metadata.update(
+                flow=FLOW_DIRECT, qwen_context=self._ocr_settings.qwen_context,
+                qwen_model=self._ocr_settings.qwen_model,
+            )
+            if self._ocr_settings.qwen_rule is not None:
+                metadata["qwen_rules"] = self._ocr_settings.qwen_rule.text
+        result = self._request(metadata)
         if not _is_translation_batch(result, len(texts)):
             self._invalid_response("the translator must return one string per input")
         return result

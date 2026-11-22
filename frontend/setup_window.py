@@ -78,16 +78,18 @@ def _configure_styles(root: tk.Tk) -> None:
 
 
 class _Checklist:
-    def __init__(self, parent, column, title, action, install):
+    def __init__(self, parent, column, title, action, install, *, row=0, span=1, height=170):
         self.frame = ttk.Frame(parent, style="Panel.TFrame", padding=12)
-        self.frame.grid(row=0, column=column, sticky="nsew", padx=(0, 6) if column == 0 else (6, 0))
+        padding = (0, 6) if column == 0 else (6, 0)
+        self.frame.grid(row=row, column=column, columnspan=span, sticky="nsew",
+                        padx=padding if span == 1 else 0, pady=(10, 0) if row else 0)
         self.frame.columnconfigure(0, weight=1)
         self.frame.rowconfigure(1, weight=1)
         ttk.Label(self.frame, text=title, style="Group.TLabel").grid(row=0, column=0, sticky="w")
         self.select_all = ttk.Button(self.frame, text="Chọn tất cả", command=self._toggle_all)
         self.select_all.grid(row=0, column=1, sticky="e", columnspan=2)
 
-        self.canvas = tk.Canvas(self.frame, background=_PANEL, highlightthickness=0, width=275, height=170)
+        self.canvas = tk.Canvas(self.frame, background=_PANEL, highlightthickness=0, width=275, height=height)
         self.canvas.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 10))
         scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.canvas.yview)
         scrollbar.grid(row=1, column=2, sticky="ns", pady=(8, 10))
@@ -160,10 +162,15 @@ class _Checklist:
 
 
 class _SetupWindow:
-    def __init__(self, root: tk.Tk, items: Sequence[InstallationItem], executor: ThreadPoolExecutor):
+    def __init__(self, root, items: Sequence[InstallationItem], executor: ThreadPoolExecutor,
+                 finish, *, install_now=False, offer_optional=False):
         self.root = root
         self.items = tuple(items)
         self.executor = executor
+        self.finish = finish
+        self.install_now = install_now
+        self.can_continue = False
+        self.offer_optional = offer_optional
         self.messages = SimpleQueue()
         self.log_lines = SimpleQueue()
         self.job: Future | None = None
@@ -205,6 +212,14 @@ class _SetupWindow:
         self.groups.rowconfigure(0, weight=1)
         self.libraries = _Checklist(self.groups, 0, "Thư viện Python", "Cài thư viện đã chọn", self._install)
         self.models = _Checklist(self.groups, 1, "Mô hình", "Cài mô hình đã chọn", self._install)
+        if install_now:
+            self.libraries.frame.grid_remove()
+            self.models.frame.grid_configure(column=0, columnspan=2, padx=0)
+        self.optional = _Checklist(
+            self.groups, 0, "Mô hình bổ sung", "Cài mô hình bổ sung đã chọn", self._install,
+            row=1, span=2, height=105,
+        )
+        self.optional.frame.grid_remove()
 
         self.log_panel = ttk.Frame(frame, style="Panel.TFrame", padding=10)
         self.log_panel.columnconfigure(0, weight=1)
@@ -224,6 +239,7 @@ class _SetupWindow:
         self.details = ttk.Label(frame, style="Error.TLabel", wraplength=610)
         self.details.pack(anchor="w", pady=(10, 0))
         self.retry = ttk.Button(frame, text="Thử lại")
+        self.continue_button = ttk.Button(frame, text="Tiếp tục", command=self._complete, style="Install.TButton")
 
         self.scan_timer = root.after_idle(self._start_scan)
         self.poll_timer = root.after(25, self._poll)
@@ -243,14 +259,22 @@ class _SetupWindow:
         self._submit(lambda: _scan(self.items, self._report), self._finish_scan)
 
     def _finish_scan(self, result):
-        self._display_missing(result)
-        if not result.missing:
+        required = [item for item in result.missing if not item.optional]
+        self.offer_optional = self.offer_optional or bool(required)
+        if not result.missing or not self.offer_optional:
             self._complete()
-        elif result.errors:
+            return
+        self._display_missing(result)
+        if result.errors:
             item = next(item for item in result.missing if item.key in result.errors)
             self._show_failure(item, result.errors[item.key], checking=True)
+        elif self.install_now:
+            self.install_now = False
+            self._install(required)
         else:
-            self._set_status("Chọn các mục còn thiếu để cài đặt.", 100)
+            status = ("Chọn các mục còn thiếu để cài đặt." if required
+                      else "Đã đủ mục bắt buộc. Bạn có thể cài thêm mô hình hoặc tiếp tục.")
+            self._set_status(status, 100)
             self._set_enabled(True)
 
     def _install(self, selected):
@@ -359,8 +383,20 @@ class _SetupWindow:
             self._show_retry("Kiểm tra lại", self._start_scan)
 
     def _display_missing(self, result):
+        self.can_continue = all(item.optional for item in result.missing)
         self.libraries.update(item for item in result.missing if item.category == "library")
-        self.models.update(item for item in result.missing if item.category == "model")
+        self.models.update(item for item in result.missing if item.category == "model" and not item.optional)
+        self.optional.update(item for item in result.missing if item.optional)
+        if self.optional.entries:
+            self.optional.frame.grid()
+            if not self.log_panel.winfo_manager():
+                self.root.minsize(670, 570)
+        else:
+            self.optional.frame.grid_remove()
+        if self.can_continue and self.offer_optional:
+            self.continue_button.pack(anchor="e", pady=(10, 0))
+        else:
+            self.continue_button.pack_forget()
         if result.missing and not self.groups.winfo_manager():
             self.groups.pack(before=self.details, fill="both", expand=True, pady=(16, 0))
 
@@ -371,6 +407,8 @@ class _SetupWindow:
     def _set_enabled(self, enabled):
         self.libraries.set_enabled(enabled)
         self.models.set_enabled(enabled)
+        self.optional.set_enabled(enabled)
+        self.continue_button.state(["!disabled" if enabled and self.can_continue else "disabled"])
 
     def _set_status(self, label, percent, *, animate=True):
         self.status.configure(text=label)
@@ -433,7 +471,7 @@ class _SetupWindow:
 
         if job_finished:
             if self.closing:
-                self.root.quit()
+                self.finish()
                 return
             job, finished = self.job, self.on_done
             self.job = None
@@ -453,7 +491,7 @@ class _SetupWindow:
         self._set_status("Đã kiểm tra xong.", 100)
         self.root.update_idletasks()
         self.ready = True
-        self.root.quit()
+        self.finish()
 
     def _close(self):
         self.closing = True
@@ -461,27 +499,47 @@ class _SetupWindow:
         self.retry.pack_forget()
         self._set_enabled(False)
         if self.job is None or self.job.done():
-            self.root.quit()
+            self.finish()
         else:
             self._set_status("Đang chờ thao tác hiện tại hoàn tất để đóng…", self.percent, animate=False)
 
 
-def run_setup(items: Sequence[InstallationItem]) -> bool:
-    """Return True only after a fresh readiness scan passes for every item."""
-    set_process_app_id()
-    root = tk.Tk()
+def run_setup(items: Sequence[InstallationItem], *, parent=None, install_now=False) -> bool:
+    """Run startup setup or open a modal to review or install missing models."""
+    if parent is None:
+        set_process_app_id()
+        root = tk.Tk()
+        finish = root.quit
+        wait = root.mainloop
+    else:
+        previous_grab = parent.grab_current()
+        root = tk.Toplevel(parent)
+        root.transient(parent)
+        closed = tk.BooleanVar(master=root)
+        finish = lambda: closed.set(True)
+        wait = lambda: root.wait_variable(closed)
+        root.bind("<Destroy>", lambda event: finish() if event.widget is root else None)
     try:
-        def fail_closed(exc_type, exc, traceback):
-            logging.getLogger(__name__).error("Startup setup failed", exc_info=(exc_type, exc, traceback))
-            root.quit()
-
-        root.report_callback_exception = fail_closed
+        if parent is None:
+            def fail_closed(exc_type, exc, traceback):
+                logging.getLogger(__name__).error("Startup setup failed", exc_info=(exc_type, exc, traceback))
+                finish()
+            root.report_callback_exception = fail_closed
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-trans-setup") as executor:
-            window = _SetupWindow(root, items, executor)
+            window = _SetupWindow(
+                root, items, executor, finish, install_now=install_now,
+                offer_optional=parent is not None and not install_now,
+            )
             try:
-                root.mainloop()
+                if parent is not None:
+                    root.grab_set()
+                wait()
             finally:
-                window.stop_timers()
+                if root.winfo_exists():
+                    window.stop_timers()
             return window.ready and not window.closing
     finally:
-        root.destroy()
+        if root.winfo_exists():
+            root.destroy()
+        if parent is not None and previous_grab is not None and previous_grab.winfo_exists():
+            previous_grab.grab_set()

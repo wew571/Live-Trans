@@ -2,23 +2,43 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 import hashlib
 from http.client import HTTPException
 import json
 from pathlib import Path
 import re
+from shutil import copyfileobj
+from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
-from zipfile import is_zipfile
+from zipfile import ZipFile, is_zipfile
 
+from core.ocr_settings import DEFAULT_JA_MODEL, FLOW_DIRECT, JA_MODEL_KEYS, OCR_SIZES, OCRSettings, ocr_model_key
 from core.setup_environment import read_setup_environment
 from core.setup_types import DownloadInterrupted, InstallationItem, Progress
 
 
 _MITSUA = "Mitsua/elan-mt-bt-ja-en"
+_NLLB = "facebook/nllb-200-distilled-600M"
 _VINAI = "vinai/vinai-translate-en2vi-v2"
+QWEN_MODEL_KEY = "live-translate-qwen"
+QWEN_2B_MODEL_KEY = "live-translate-qwen-2b"
+QWEN_RUNTIME_KEY = "live-qwen-runtime"
+_QWEN_MODEL = "Qwen3.5-4B-Q4_K_M.gguf"
+_QWEN_MODEL_URL = f"https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/main/{_QWEN_MODEL}"
+_QWEN_RUNTIME_RELEASE = "b12621"
+_QWEN_RUNTIME_ZIP = f"llama-{_QWEN_RUNTIME_RELEASE}-bin-win-vulkan-x64.zip"
+_QWEN_RUNTIME_URL = f"https://github.com/ggml-org/llama.cpp/releases/download/{_QWEN_RUNTIME_RELEASE}/{_QWEN_RUNTIME_ZIP}"
+_RUNTIME_REQUIRED = {
+    "llama-server.exe", "llama-server-impl.dll", "llama-common.dll", "llama.dll",
+    "ggml-base.dll", "ggml-vulkan.dll", "ggml.dll", "mtmd.dll",
+}
+_OPTIONAL_MODEL_KEYS = {
+    JA_MODEL_KEYS["nllb"], ocr_model_key("det", "medium"), ocr_model_key("rec", "medium"),
+}
 _CHUNK_SIZE = 1024 * 1024
 _PENDING_NAME = ".mangalens-setup.pending"
 _FILENAME = re.compile(r"[\w.-]+", re.ASCII)
@@ -43,6 +63,9 @@ _PROFILES = {
     "mbart": _Files(("config.json",), (_WEIGHTS, _MBART_TOKEN), (
         "generation_config.json", "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json",
     )),
+    "nllb": _Files(("config.json",), (_WEIGHTS, (("tokenizer.json",), ("sentencepiece.bpe.model",))), (
+        "generation_config.json", "tokenizer_config.json", "special_tokens_map.json",
+    )),
     "live-ocr": _Files(("config.json", "preprocessor_config.json", "inference.yml", "model.safetensors")),
 }
 
@@ -60,6 +83,17 @@ class _Model:
 class _RemoteFile:
     size: int
     checksum: str
+
+
+_QWEN_MODEL_ASSET = _RemoteFile(3032091584, "217002fa8008ef4fc6d548353a3aebef055a96e6ff8e0e2c0953ef8254a89c14")
+_QWEN_2B_MODEL_ASSET = _RemoteFile(1312165056, "a8b50de00b780c0f3c16f07cb041a1ecd678b6e22fd8cde91e57fe4b5031523b")
+_QWEN_VARIANTS = {
+    "4b": (QWEN_MODEL_KEY, _QWEN_MODEL, _QWEN_MODEL_URL, _QWEN_MODEL_ASSET),
+    "2b": (QWEN_2B_MODEL_KEY, "Qwen3.5-2B-Q4_K_M.gguf",
+           "https://huggingface.co/SoAIHQ/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+           _QWEN_2B_MODEL_ASSET),
+}
+_QWEN_RUNTIME_ASSET = _RemoteFile(38871144, "38c58fe8b3eb5bfb892d02e9b67349a1ee8eb5d1bf81c0fb4894a2d7ebaf1e4d")
 
 
 def _path(root: Path, value: str | Path) -> Path:
@@ -80,15 +114,17 @@ def _hub_caches(root: Path, env: dict[str, str]) -> tuple[Path, ...]:
 
 def _model_specs(root: Path) -> dict[str, _Model]:
     models = [
-        _Model("translate-ja-en", "Japanese → English (Mitsua ElanMT)", _MITSUA, _PROFILES["marian"]),
+        _Model(JA_MODEL_KEYS[DEFAULT_JA_MODEL], "Japanese → English (Mitsua ElanMT)", _MITSUA, _PROFILES["marian"]),
         _Model("live-translate-en-vi", "English → Vietnamese (VinAI Translate v2)", _VINAI, _PROFILES["mbart"]),
+        _Model(JA_MODEL_KEYS["nllb"], "Japanese → English (NLLB-200 Distilled 600M)", _NLLB, _PROFILES["nllb"]),
     ]
-    for role in ("det", "rec"):
-        name = f"PP-OCRv6_small_{role}_safetensors"
-        models.append(_Model(
-            f"live-ocr-{role}", f"Live OCR ({name})", f"PaddlePaddle/{name}", _PROFILES["live-ocr"],
-            root / "models" / "live-ocr" / name,
-        ))
+    for size in OCR_SIZES:
+        for role in ("det", "rec"):
+            name = f"PP-OCRv6_{size}_{role}_safetensors"
+            models.append(_Model(
+                ocr_model_key(role, size), f"Live OCR ({name})", f"PaddlePaddle/{name}",
+                _PROFILES["live-ocr"], root / "models" / "live-ocr" / name,
+            ))
     return {model.key: model for model in models}
 
 
@@ -187,9 +223,97 @@ def resolve_model(root: Path, key: str) -> str:
     return model.source
 
 
-def model_items(root: Path) -> list[InstallationItem]:
-    """Build distinct model items without making network or filesystem changes."""
+def qwen_model_path(root: Path, variant: str = "4b") -> Path:
+    return root / "model" / _QWEN_VARIANTS[variant][1]
+
+
+def qwen_server_path(root: Path) -> Path:
+    return root / "models" / "live-qwen-runtime" / f"{_QWEN_RUNTIME_RELEASE}-vulkan" / "llama-server.exe"
+
+
+def _qwen_runtime_archive(root: Path) -> Path:
+    return qwen_server_path(root).parent.parent / _QWEN_RUNTIME_ZIP
+
+
+def _qwen_model_ready(root: Path, variant: str = "4b") -> bool:
+    path = qwen_model_path(root, variant)
+    if not _same_size(path, _QWEN_VARIANTS[variant][3].size):
+        return False
+    try:
+        with path.open("rb") as stream:
+            return stream.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
+def _qwen_runtime_ready(root: Path) -> bool:
+    directory = qwen_server_path(root).parent
+    try:
+        files = json.loads((directory / "installed.json").read_text(encoding="utf-8"))
+        return (
+            isinstance(files, dict) and _RUNTIME_REQUIRED.issubset(files)
+            and all(
+                _FILENAME.fullmatch(name) and name not in {".", ".."}
+                and type(size) is int and size > 0 and _same_size(directory / name, size)
+                for name, size in files.items()
+            )
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _install_qwen_model(root: Path, progress: Progress, variant: str = "4b") -> None:
+    if not _qwen_model_ready(root, variant):
+        _, _, url, asset = _QWEN_VARIANTS[variant]
+        _download({}, url, asset, qwen_model_path(root, variant), lambda amount: progress(amount, asset.size))
+        if not _qwen_model_ready(root, variant):
+            raise RuntimeError("The verified Qwen file is not a complete GGUF model.")
+
+
+def _install_qwen_runtime(root: Path, progress: Progress) -> None:
+    if _qwen_runtime_ready(root):
+        return
+    archive = _qwen_runtime_archive(root)
+    asset = _QWEN_RUNTIME_ASSET
+    _download({}, _QWEN_RUNTIME_URL, asset, archive, lambda amount: progress(amount, asset.size))
+    directory = qwen_server_path(root).parent
+    with TemporaryDirectory(dir=directory.parent, prefix="extract-") as temporary, ZipFile(archive) as bundle:
+        stage = Path(temporary)
+        files = {}
+        for member in bundle.infolist():
+            name = member.filename
+            if not _FILENAME.fullmatch(name) or not (name.endswith(".dll") or name == "llama-server.exe"):
+                continue
+            with bundle.open(member) as source, (stage / name).open("xb") as destination:
+                copyfileobj(source, destination)
+            files[name] = member.file_size
+        if not _RUNTIME_REQUIRED.issubset(files):
+            raise RuntimeError("The llama.cpp archive is missing files required by its server.")
+        (stage / "installed.json").write_text(json.dumps(files), encoding="utf-8")
+        directory.mkdir(exist_ok=True)
+        manifest = directory / "installed.json"
+        manifest.unlink(missing_ok=True)
+        for name in files:
+            (stage / name).replace(directory / name)
+        (stage / manifest.name).replace(manifest)
+
+
+def model_items(
+    root: Path, ocr_settings: OCRSettings | None = None, *, include_optional: bool = False,
+) -> list[InstallationItem]:
+    """Return selected models or the startup inventory with its optional add-ons."""
     root = root.resolve()
+    settings = ocr_settings or OCRSettings.load(root)
+    if include_optional and settings.flow != FLOW_DIRECT:
+        settings = OCRSettings()
+    selected = {
+        ocr_model_key("det", settings.det), ocr_model_key("rec", settings.rec),
+    }
+    if settings.flow == FLOW_DIRECT:
+        selected.update({_QWEN_VARIANTS[settings.qwen_model][0], QWEN_RUNTIME_KEY})
+    else:
+        selected.update({JA_MODEL_KEYS[settings.ja_model], "live-translate-en-vi"})
+
     def check(model):
         return _ready_path(root, read_setup_environment(root), model) is not None
 
@@ -198,13 +322,45 @@ def model_items(root: Path) -> list[InstallationItem]:
         if _ready_path(root, env, model) is None:
             _install(root, env, model, progress)
 
-    return [
+    items = [
         InstallationItem(
             model.key, model.label, "model",
             lambda model=model: check(model), lambda progress, model=model: install(model, progress),
+            optional=model.key not in selected,
         )
         for model in _model_specs(root).values()
+        if model.key in selected or include_optional
     ]
+    for key, label, ready, install_qwen_item in (
+        (QWEN_MODEL_KEY, "Qwen3.5-4B Q4_K_M", _qwen_model_ready, _install_qwen_model),
+        (QWEN_2B_MODEL_KEY, "Qwen3.5-2B Q4_K_M",
+         partial(_qwen_model_ready, variant="2b"), partial(_install_qwen_model, variant="2b")),
+        (QWEN_RUNTIME_KEY, "llama.cpp Vulkan (Qwen)", _qwen_runtime_ready, _install_qwen_runtime),
+    ):
+        if key in selected or include_optional:
+            items.append(InstallationItem(
+                key, label, "model", lambda ready=ready: ready(root),
+                lambda progress, install_qwen_item=install_qwen_item: install_qwen_item(root, progress),
+                optional=key not in selected,
+            ))
+    return items
+
+
+def available_model_settings(root: Path) -> OCRSettings:
+    """Use the defaults for selected add-ons whose local files are missing."""
+    settings = OCRSettings.load(root)
+    if settings.flow == FLOW_DIRECT:
+        return settings
+    missing = {
+        item.key for item in model_items(root, settings)
+        if item.key in _OPTIONAL_MODEL_KEYS and not item.is_ready()
+    }
+    return replace(
+        settings,
+        det="small" if ocr_model_key("det", settings.det) in missing else settings.det,
+        rec="small" if ocr_model_key("rec", settings.rec) in missing else settings.rec,
+        ja_model=DEFAULT_JA_MODEL if JA_MODEL_KEYS[settings.ja_model] in missing else settings.ja_model,
+    )
 
 
 def _request(env, url, **headers):
