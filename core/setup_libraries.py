@@ -248,7 +248,7 @@ def _live_executable(root, settings):
 def _live_paths(root, runtime):
     settings = read_setup_environment(root)
     executable = _live_executable(root, settings)
-    configured_path = settings.get("MANGALENS_LIVE_PYTHONPATH")
+    configured_path = settings.get("LIVE_PYTHONPATH")
     overlay = str(runtime) if configured_path is None else configured_path
     if executable == sys.executable:
         return [*(str(root / entry) for entry in overlay.split(os.pathsep) if entry), *sys.path]
@@ -281,9 +281,9 @@ def _install_live(root, runtime, pin, pins, label, progress, log=None):
         return
     settings = read_setup_environment(root)
     executable = _live_executable(root, settings)
-    if settings.get("MANGALENS_LIVE_PYTHONPATH") is not None:
+    if settings.get("LIVE_PYTHONPATH") is not None:
         raise RuntimeError(
-            f"Install {pin.requirement} in the configured MANGALENS_LIVE_PYTHONPATH, "
+            f"Install {pin.requirement} in the configured LIVE_PYTHONPATH, "
             f"or clear that setting to let {APP_NAME} manage its default live runtime."
         )
     runtime.parent.mkdir(parents=True, exist_ok=True)

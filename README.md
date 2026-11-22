@@ -111,9 +111,9 @@ Chữ nhỏ, phông cách điệu hoặc nền phức tạp có thể làm OCR �
 
 Bạn có thể tạo tệp `.env` trong thư mục chứa `main.py` để đặt các biến sau:
 
-- `MANGALENS_LIVE_CAPTURE_FPS` đặt tốc độ chụp màn hình thành `30` (mặc định) hoặc `60`.
+- `LIVE_CAPTURE_FPS` đặt tốc độ chụp màn hình thành `30` (mặc định) hoặc `60`.
 - `HF_HOME` hoặc `HF_HUB_CACHE` đổi vị trí lưu mô hình dịch. Mặc định, mô hình dịch nằm trong `models/hub/` và mô hình OCR nằm trong `models/live-ocr/`.
-- `MANGALENS_LIVE_PYTHONPATH` chỉ định đường dẫn đến bộ thư viện xử lý riêng. Nếu dùng tùy chọn này, hãy cài các gói xử lý vào đường dẫn đã chọn.
+- `LIVE_PYTHONPATH` chỉ định đường dẫn đến bộ thư viện xử lý riêng. Nếu dùng tùy chọn này, hãy cài các gói xử lý vào đường dẫn đã chọn.
 
 ### Cài thư viện thủ công
 

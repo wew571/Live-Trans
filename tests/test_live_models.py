@@ -21,7 +21,7 @@ def client_type():
 @pytest.fixture
 def child_modules(tmp_path, monkeypatch):
     monkeypatch.setenv("MANGALENS_LIVE_PYTHON", sys.executable)
-    monkeypatch.setenv("MANGALENS_LIVE_PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("LIVE_PYTHONPATH", str(tmp_path))
 
     def write_module(name, source):
         (tmp_path / f"{name}.py").write_text(textwrap.dedent(source), encoding="utf-8")

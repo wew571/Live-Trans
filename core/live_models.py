@@ -67,7 +67,7 @@ def _worker_environment():
     env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     # Changing OCR tensor shapes accumulate cuDNN convolution plans in host RAM.
     env.setdefault("TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT", "512")
-    runtime = env.get("MANGALENS_LIVE_PYTHONPATH")
+    runtime = env.get("LIVE_PYTHONPATH")
     default_runtime = _ROOT / "models" / "live-runtime"
     if runtime is None and default_runtime.is_dir():
         runtime = str(default_runtime)

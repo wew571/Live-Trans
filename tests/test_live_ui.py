@@ -39,6 +39,19 @@ def panel(gui):
     return dashboard, session, overlay
 
 
+def test_live_capture_fps_uses_the_environment_setting(monkeypatch):
+    from core import live_translation
+
+    create_session = Mock()
+    monkeypatch.setattr(live_translation, "LiveTranslationSession", create_session)
+    monkeypatch.setenv("LIVE_CAPTURE_FPS", "60")
+    dashboard = SimpleNamespace(_ocr_settings=Mock())
+
+    ControlPanel._create_live_session(dashboard)
+
+    assert create_session.call_args.kwargs["capture_fps"] == 60
+
+
 def test_dashboard_uses_live_trans_name_and_transparent_assets(panel):
     dashboard, _, _ = panel
     assert dashboard.title() == "Live Trans"

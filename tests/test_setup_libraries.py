@@ -34,7 +34,7 @@ def test_live_transformers_does_not_satisfy_main_transformers(tmp_path, monkeypa
     from core import setup_libraries as setup
 
     monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.delenv("MANGALENS_LIVE_PYTHONPATH", raising=False)
+    monkeypatch.delenv("LIVE_PYTHONPATH", raising=False)
     monkeypatch.delenv("MANGALENS_LIVE_PYTHON", raising=False)
     root = _root(tmp_path, "transformers==4.57.1", "transformers==5.23.0")
     _wheel(tmp_path, "transformers", "5.23.0", "transformers")
@@ -140,7 +140,7 @@ def test_opencv_reinstalls_the_required_wheel_locally_when_shared_copy_conflicts
 def test_matching_paddle_cuda_wheel_satisfies_both_modes(tmp_path, monkeypatch):
     from core import setup_libraries as setup
 
-    monkeypatch.delenv("MANGALENS_LIVE_PYTHONPATH", raising=False)
+    monkeypatch.delenv("LIVE_PYTHONPATH", raising=False)
     monkeypatch.delenv("MANGALENS_LIVE_PYTHON", raising=False)
     monkeypatch.syspath_prepend(str(tmp_path))
     _wheel(tmp_path, "paddlepaddle-gpu", "3.3.1", "paddle")
@@ -155,7 +155,7 @@ def test_matching_paddle_cuda_wheel_satisfies_both_modes(tmp_path, monkeypatch):
 def test_pip_success_without_staged_payload_preserves_previous_live_runtime(tmp_path, monkeypatch):
     from core import setup_libraries as setup
 
-    monkeypatch.delenv("MANGALENS_LIVE_PYTHONPATH", raising=False)
+    monkeypatch.delenv("LIVE_PYTHONPATH", raising=False)
     monkeypatch.delenv("MANGALENS_LIVE_PYTHON", raising=False)
     root = _root(tmp_path, "", "transformers==5.23.0")
     runtime = root / "models" / "live-runtime"
@@ -178,7 +178,7 @@ def test_pip_success_without_staged_payload_preserves_previous_live_runtime(tmp_
 def test_live_install_preserves_other_packages_and_replaces_stale_metadata(tmp_path, monkeypatch):
     from core import setup_libraries as setup
 
-    monkeypatch.delenv("MANGALENS_LIVE_PYTHONPATH", raising=False)
+    monkeypatch.delenv("LIVE_PYTHONPATH", raising=False)
     monkeypatch.delenv("MANGALENS_LIVE_PYTHON", raising=False)
     root = _root(tmp_path, "", "transformers==5.23.0\ncustom-live-wheel==3.0")
     runtime = root / "models" / "live-runtime"
@@ -209,10 +209,10 @@ def test_live_install_preserves_other_packages_and_replaces_stale_metadata(tmp_p
 def test_live_scan_uses_configured_dotenv_overlay(tmp_path, monkeypatch):
     from core import setup_libraries as setup
 
-    monkeypatch.delenv("MANGALENS_LIVE_PYTHONPATH", raising=False)
+    monkeypatch.delenv("LIVE_PYTHONPATH", raising=False)
     monkeypatch.delenv("MANGALENS_LIVE_PYTHON", raising=False)
     root = _root(tmp_path, "", "separate-live-wheel==2.0")
-    (root / ".env").write_text("MANGALENS_LIVE_PYTHONPATH=runtime-override\n", encoding="utf-8")
+    (root / ".env").write_text("LIVE_PYTHONPATH=runtime-override\n", encoding="utf-8")
     _wheel(root / "runtime-override", "separate-live-wheel", "2.0", "separate_live_wheel")
 
     assert _items(setup, root)["live:separate-live-wheel"].is_ready()
@@ -222,7 +222,7 @@ def test_live_scan_uses_configured_dotenv_overlay(tmp_path, monkeypatch):
 def test_live_worker_checks_the_alternate_interpreters_torch_pair(tmp_path, monkeypatch):
     from core import setup_libraries as setup
 
-    monkeypatch.delenv("MANGALENS_LIVE_PYTHONPATH", raising=False)
+    monkeypatch.delenv("LIVE_PYTHONPATH", raising=False)
     monkeypatch.delenv("MANGALENS_LIVE_PYTHON", raising=False)
     monkeypatch.syspath_prepend(str(tmp_path))
     _wheel(tmp_path, "torch", "2.11.0+cpu", "torch")

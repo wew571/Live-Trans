@@ -249,9 +249,9 @@ class ControlPanel(ctk.CTk):
         from core.live_models import LiveModelClient
         from core.live_translation import LiveTranslationSession
 
-        fps = os.getenv("MANGALENS_LIVE_CAPTURE_FPS", "30").strip()
+        fps = os.getenv("LIVE_CAPTURE_FPS", "30").strip()
         if fps not in {"30", "60"}:
-            raise ValueError("MANGALENS_LIVE_CAPTURE_FPS must be 30 or 60.")
+            raise ValueError("LIVE_CAPTURE_FPS must be 30 or 60.")
         return LiveTranslationSession(
             partial(LiveModelClient, ocr_settings=self._ocr_settings), capture_fps=int(fps),
             capture_factory=capture_factory, frame_crop=frame_crop,
