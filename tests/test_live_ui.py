@@ -12,6 +12,14 @@ from frontend.ui import ControlPanel
 def gui():
     # Keep one Tcl/Tk root per test process for these dashboard cases.
     with pytest.MonkeyPatch.context() as patch:
+        from core.ocr_settings import OCRSettings
+        from frontend import ui
+
+        def webview_unavailable(*_args):
+            raise OSError("WebView2 unavailable")
+
+        patch.setattr(ui, "WebSettingsWindow", webview_unavailable)
+        patch.setattr(ui, "available_model_settings", lambda _root: OCRSettings())
         register_hotkey = Mock(return_value=None)
         patch.setattr(keyboard, "add_hotkey", register_hotkey)
         session = Mock()
@@ -45,7 +53,7 @@ def test_live_capture_fps_uses_the_environment_setting(monkeypatch):
     create_session = Mock()
     monkeypatch.setattr(live_translation, "LiveTranslationSession", create_session)
     monkeypatch.setenv("LIVE_CAPTURE_FPS", "60")
-    dashboard = SimpleNamespace(_ocr_settings=Mock())
+    dashboard = SimpleNamespace(_ocr_settings=Mock(), _live_session_crops=None, _session_crops=lambda: ())
 
     ControlPanel._create_live_session(dashboard)
 
@@ -62,8 +70,102 @@ def test_dashboard_uses_live_trans_name_and_transparent_assets(panel):
         assert im.getchannel("A").getextrema() == (0, 255)
 
 
+def test_token_card_shows_latest_qwen_usage_to_the_right_of_auto_translate(panel):
+    from core.live_translation import LiveUpdate
+    from core.ocr_settings import OCRSettings
+
+    dashboard, session, overlay = panel
+    previous_settings = dashboard._ocr_settings
+    try:
+        dashboard._apply_ocr_settings(OCRSettings(flow="direct", qwen_context=3000))
+        dashboard.update_idletasks()
+        assert dashboard.token_card.master is dashboard.auto_card.master
+        assert dashboard.token_card.winfo_x() >= dashboard.auto_card.winfo_x() + dashboard.auto_card.winfo_width()
+        assert dashboard.token_percent.cget("text") == "0%"
+        dashboard._live_session = session
+        dashboard._live_overlay = overlay
+        dashboard._live_region = region = (0, 0, 100, 100)
+        for count, text, color in [(2255, "75%", "#a6e3a1"), (2400, "80%", "#f38ba8")]:
+            session.poll.return_value = LiveUpdate(region, (), token_count=count)
+            dashboard._poll_live()
+            assert dashboard.token_percent.cget("text") == text
+            assert dashboard.token_bar.cget("progress_color") == color
+            assert dashboard.token_bar.get() == pytest.approx(count / 3000)
+        dashboard._show_token_tooltip()
+        assert dashboard.token_tooltip.cget("text") == "2400/3000 token"
+        assert dashboard.token_tooltip.winfo_manager() == "place"
+        dashboard._hide_token_tooltip()
+        assert not dashboard.token_tooltip.winfo_manager()
+        dashboard._stop_live()
+        assert dashboard.token_percent.cget("text") == "0%"
+    finally:
+        dashboard._apply_ocr_settings(previous_settings)
+
+
+def test_dashboard_groups_region_and_context_actions_in_their_cards(panel):
+    from core.ocr_settings import OCRSettings
+
+    dashboard, _, _ = panel
+    previous_settings = dashboard._ocr_settings
+    try:
+        dashboard._apply_ocr_settings(OCRSettings(flow="direct", history_turns=2))
+        dashboard.update_idletasks()
+        area_buttons = {
+            button.cget("text"): button
+            for button in dashboard.area_card.winfo_children()
+            if button is not dashboard.area_info
+        }
+        preview = next(
+            (area_buttons[label] for label in ("Xem vùng", "View regions") if label in area_buttons),
+            None,
+        )
+        assert preview is not None
+        assert preview.winfo_y() == dashboard.btn_fullscreen.winfo_y()
+        assert preview.winfo_x() + preview.winfo_width() <= dashboard.btn_fullscreen.winfo_x()
+        assert preview.cget("state") == "disabled"
+        dashboard._set_area((10, 20, 100, 80))
+        assert preview.cget("state") == "normal"
+
+        context = next(
+            child for child in dashboard.token_card.winfo_children()
+            if isinstance(child, type(dashboard.btn_fullscreen))
+        )
+        assert context.winfo_ismapped()
+        dashboard._apply_ocr_settings(OCRSettings(flow="direct", history_turns=0))
+        dashboard.update_idletasks()
+        assert not context.winfo_ismapped()
+        dashboard._apply_ocr_settings(OCRSettings())
+        dashboard.update_idletasks()
+        assert preview.winfo_ismapped()
+        assert not context.winfo_ismapped()
+    finally:
+        dashboard._apply_ocr_settings(previous_settings)
+
+
+def test_token_card_only_uses_dashboard_space_with_qwen_presets(panel):
+    from core.ocr_settings import PRESETS
+
+    dashboard, _, _ = panel
+    previous_settings = dashboard._ocr_settings
+    try:
+        for qwen_preset, pivot_preset in [("High", "Flash"), ("Ultra", "Medium")]:
+            dashboard._apply_ocr_settings(PRESETS[qwen_preset])
+            dashboard.update_idletasks()
+            assert dashboard.token_card.winfo_manager() == "grid"
+            qwen_auto_width = dashboard.auto_card.winfo_width()
+            dashboard._show_token_tooltip()
+
+            dashboard._apply_ocr_settings(PRESETS[pivot_preset])
+            dashboard.update_idletasks()
+            assert not dashboard.token_card.winfo_manager()
+            assert not dashboard.token_tooltip.winfo_manager()
+            assert dashboard.auto_card.winfo_width() > qwen_auto_width
+    finally:
+        dashboard._apply_ocr_settings(previous_settings)
+
+
 @pytest.mark.parametrize("ready", [True, False])
-def test_settings_xhigh_saves_only_when_required_items_are_ready(panel, tmp_path, monkeypatch, ready):
+def test_settings_ultra_saves_only_when_required_items_are_ready(panel, tmp_path, monkeypatch, ready):
     from core.ocr_settings import OCRSettings, PRESETS
     from frontend import ocr_settings_window, ui
 
@@ -78,7 +180,7 @@ def test_settings_xhigh_saves_only_when_required_items_are_ready(panel, tmp_path
     dashboard.btn_settings.invoke()
     dialog = dashboard._settings_window
     dialog._choose_preset(3)
-    assert dialog.preset_name.cget("text") == "XHigh"
+    assert dialog.preset_name.cget("text") == "Ultra"
     assert dialog.det_menu.get() == dialog.rec_menu.get() == "PP-OCRv6 Medium"
     dialog.save_button.invoke()
 
@@ -96,10 +198,175 @@ def test_settings_xhigh_saves_only_when_required_items_are_ready(panel, tmp_path
         dashboard.update()
         sleep(0.01)
     assert not dialog.winfo_exists()
-    inventory.assert_called_with(tmp_path, PRESETS["XHigh"])
-    assert OCRSettings.load(tmp_path) == dashboard._ocr_settings == PRESETS["XHigh"]
+    inventory.assert_called_with(tmp_path, PRESETS["Ultra"])
+    assert OCRSettings.load(tmp_path) == dashboard._ocr_settings == PRESETS["Ultra"]
     session.close.assert_called_once()
     assert dashboard._live_session is None
+
+
+def test_native_advanced_qwen_backend_survives_preset_switches(panel, tmp_path, monkeypatch):
+    from core.live_models import LiveModelError
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_: [])
+    applied = Mock()
+    probe = Mock(side_effect=LiveModelError("CUDA 13 libraries are missing."))
+    monkeypatch.setattr(ocr_settings_window, "check_qwen_cuda_worker", probe)
+    dialog = ocr_settings_window.OCRSettingsWindow(dashboard, tmp_path, OCRSettings(), "VI", applied)
+    try:
+        dialog._toggle_advanced()
+        assert not dialog.context_frame.winfo_manager()
+
+        dialog._choose_preset(3)
+        assert dialog.context_frame.winfo_manager() == "pack"
+        assert dialog.backend_menu.get() == "llama.cpp Vulkan (mặc định)"
+        dialog.backend_menu.set("llama-cpp-python CUDA (bổ sung)")
+
+        dialog._choose_preset(1)
+        assert not dialog.context_frame.winfo_manager()
+        dialog._choose_preset(2)
+        assert dialog.backend_menu.get() == "llama-cpp-python CUDA (bổ sung)"
+        dialog.save_button.invoke()
+        assert dialog.winfo_exists()
+        assert "CUDA 13 libraries" in dialog.status.cget("text")
+        assert OCRSettings.load(tmp_path).qwen_backend == "vulkan"
+        applied.assert_not_called()
+
+        probe.side_effect = None
+        dialog.save_button.invoke()
+        saved = OCRSettings.load(tmp_path)
+        assert saved.preset == "High"
+        assert saved.qwen_backend == "cuda-python"
+        applied.assert_called_once_with(saved)
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()
+
+
+def test_settings_interface_defaults_to_native_and_can_switch_to_web(panel, tmp_path, monkeypatch):
+    from frontend import ocr_settings_window, ui
+    from core.ocr_settings import OCRSettings
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_: [])
+    stop_live = Mock()
+    monkeypatch.setattr(dashboard, "_stop_live", stop_live)
+    host = Mock()
+    monkeypatch.setattr(ui, "WebSettingsWindow", host)
+    dashboard.btn_settings.invoke()
+    native = dashboard._settings_window
+    host.assert_not_called()
+    assert native.interface_menu.get() == "Tối giản"
+    native.interface_menu.set("Nâng cao")
+    native.save_button.invoke()
+    assert OCRSettings.load(tmp_path).settings_interface == "advanced"
+    stop_live.assert_not_called()
+    dashboard.btn_settings.invoke()
+    host.assert_called_once()
+    host.call_args.args[3]()
+
+
+def test_dashboard_uses_one_web_settings_window_and_falls_back_on_startup_failure(panel, tmp_path, monkeypatch):
+    from frontend import ui
+    from frontend.ocr_settings_window import OCRSettingsWindow
+    from core.ocr_settings import OCRSettings
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings(settings_interface="advanced"))
+    window = Mock()
+    constructor = Mock(return_value=window)
+    monkeypatch.setattr(ui, "WebSettingsWindow", constructor)
+    dashboard.btn_settings.invoke()
+    dashboard.btn_settings.invoke()
+    constructor.assert_called_once()
+    window.focus_set.assert_called_once()
+
+    _, request, fallback, closed = constructor.call_args.args
+    reply = Mock()
+    request("bootstrap", None, reply)
+    assert len(reply.call_args.args[0]["presets"]) == 6
+    fallback()
+    closed()
+    assert isinstance(dashboard._settings_window, OCRSettingsWindow)
+    assert not dashboard.attributes("-disabled")
+    dashboard._settings_window.destroy()
+
+
+def test_web_rules_quick_close_replies_and_cancels_window_timers(panel, tmp_path):
+    from frontend.web_settings import WebSettingsSession
+
+    dashboard, _, _ = panel
+    session = WebSettingsSession(dashboard, tmp_path, dashboard._ocr_settings, "VI", Mock())
+    reply = Mock()
+    session.request("manage_rules", None, reply)
+    editor = session._rules_window
+    timers = {
+        job for job in dashboard.tk.call("after", "info")
+        if dashboard.tk.call("after", "info", job)[0] in editor._tclCommands
+    }
+    editor.destroy()
+    reply.assert_called_once()
+    assert session._rules_window is None
+    assert dashboard.grab_current() is None
+    assert not timers.intersection(dashboard.tk.call("after", "info"))
+
+
+@pytest.mark.parametrize("preset", [None, "Ultra", "Extreme", "Ultimate"])
+def test_web_rule_editor_uses_the_draft_preset_colors(panel, tmp_path, preset):
+    from frontend.ocr_settings_window import _PRESET_APPEARANCES
+    from frontend.web_settings import WebSettingsSession
+
+    dashboard, _, _ = panel
+    session = WebSettingsSession(dashboard, tmp_path, dashboard._ocr_settings, "VI", Mock())
+    session.request("manage_rules", {"theme_preset": preset}, Mock())
+    try:
+        editor = session._rules_window
+        if preset:
+            theme = _PRESET_APPEARANCES[preset]
+            assert editor.heading.cget("text_color") == theme.ink
+            assert editor.slot_menu.cget("fg_color") == theme.control
+            assert editor.name_entry.cget("border_color") == theme.border
+            assert editor.save_button.cget("fg_color") == theme.control
+        else:
+            assert editor.save_button.cget("fg_color") == editor.slot_menu.cget("fg_color")
+    finally:
+        session.close()
+
+
+def test_dashboard_stays_blocked_after_closing_web_rules(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings(settings_interface="advanced"))
+    mock_window = Mock()
+    host = Mock(return_value=mock_window)
+    monkeypatch.setattr(ui, "WebSettingsWindow", host)
+    start_live = Mock()
+    monkeypatch.setattr(dashboard, "_start_live", start_live)
+    dashboard.btn_settings.invoke()
+    _, request, _, closed = host.call_args.args
+    try:
+        reply = Mock()
+        request("manage_rules", None, reply)
+        rule_editor = dashboard.grab_current()
+        rule_editor.tk.call(rule_editor.protocol("WM_DELETE_WINDOW"))
+        reply.assert_called_once()
+        assert dashboard._settings_window is mock_window
+        assert dashboard.attributes("-disabled")
+        dashboard.trigger_scan()
+        start_live.assert_not_called()
+    finally:
+        closed()
+    assert not dashboard.attributes("-disabled")
+    dashboard.trigger_scan()
+    start_live.assert_called_once()
 
 
 def test_advanced_direct_flow_retains_context_and_marks_a_custom_preset(panel, tmp_path, monkeypatch):
@@ -128,6 +395,169 @@ def test_advanced_direct_flow_retains_context_and_marks_a_custom_preset(panel, t
     assert OCRSettings.load(tmp_path) == OCRSettings(rec="medium", flow="direct", qwen_context=5200)
 
 
+def test_preset_slider_has_six_stops_and_thumb_reaches_both_ends(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    try:
+        slider = dialog.slider
+        canvas = slider.canvas
+        deadline = monotonic() + 2
+        while not canvas.winfo_ismapped() and monotonic() < deadline:
+            dashboard.update()
+            sleep(0.01)
+        assert canvas.winfo_ismapped()
+        assert [button.cget("text") for button in dialog.preset_buttons] == [
+            "Flash", "Medium", "High", "Ultra", "Extreme", "Ultimate",
+        ]
+        assert len(canvas.find_withtag("preset-marker")) == 6
+
+        def track_bounds():
+            track_x = [
+                x for item in canvas.find_withtag("preset-track") for x in canvas.coords(item)[::2]
+            ]
+            return min(track_x), max(track_x)
+
+        def thumb_bounds():
+            left, _, right, _ = canvas.coords("preset-thumb")
+            return left, right
+
+        left, right = track_bounds()
+        assert thumb_bounds()[0] == pytest.approx(left, abs=1)
+
+        y = canvas.winfo_height() // 2
+        dialog.interface_menu.set("Nâng cao")
+        dialog.animation_switch.toggle()
+        _, _, start, travel = slider._geometry()
+
+        def drag_to(position):
+            canvas.event_generate("<B1-Motion>", x=round(start + travel * position / 5), y=y)
+
+        canvas.event_generate("<Button-1>", x=int(left), y=y)
+        drag_to(2.6)
+        assert slider.get() == 2
+        canvas.event_generate("<ButtonRelease-1>", x=round(start + travel * 2.6 / 5), y=y)
+        assert slider.get() == 2
+        canvas.event_generate("<Button-1>", x=round(start + travel * 2 / 5), y=y)
+        drag_to(2.8)
+        assert slider.get() == 3
+        drag_to(3.6)
+        assert slider.get() == 3
+        drag_to(3.8)
+        assert slider.get() == 4
+        drag_to(4.8)
+        assert slider.get() == 4
+        canvas.event_generate("<ButtonRelease-1>", x=round(start + travel * 4.8 / 5), y=y)
+
+        canvas.event_generate("<Button-1>", x=int(left), y=y)
+        canvas.event_generate("<B1-Motion>", x=int(right), y=y)
+        canvas.event_generate("<ButtonRelease-1>", x=int(right), y=y)
+        assert slider.get() == 5
+        assert dialog.preset_name.cget("text") == "Ultimate"
+        assert "Qwen3.8-27B" in dialog.summary.cget("text")
+        assert "Nhật → Việt · Anh → Việt" in dialog.summary.cget("text")
+
+        deadline = monotonic() + 1
+        while thumb_bounds()[1] < right - 1 and monotonic() < deadline:
+            dashboard.update()
+            sleep(0.01)
+        assert thumb_bounds()[1] == pytest.approx(right, abs=1)
+
+        dialog.preset_buttons[4].invoke()
+        assert slider.get() == 4
+        assert dialog.preset_name.cget("text") == "Extreme"
+    finally:
+        dialog.destroy()
+
+
+def test_settings_tier_text_colors_follow_preset_and_reset(panel, tmp_path, monkeypatch):
+    from colorsys import rgb_to_hsv
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    try:
+        def text_hsv(widget):
+            color = widget.cget("text_color")
+            if isinstance(color, (tuple, list)):
+                color = color[1]  # Settings uses dark appearance.
+            rgb = tuple(component / 65535 for component in widget.winfo_rgb(color))
+            return rgb_to_hsv(*rgb)
+
+        def colors():
+            labels = (dialog.title_label, dialog.preset_name, dialog.summary,
+                      *dialog._field_labels.values(), dialog.context_label, dialog.active_rule_label)
+            return tuple(text_hsv(label) for label in labels)
+
+        dialog.interface_menu.set("Nâng cao")
+        dialog.animation_switch.toggle()
+        neutral = None
+        for index, family in [(0, None), (1, None), (2, None), (3, (0.70, 0.88)),
+                              (4, (0.24, 0.48)), (5, (0.04, 0.16)), (0, None)]:
+            dialog.preset_buttons[index].invoke()
+            assert dialog.preset_name.winfo_manager()
+            current = colors()
+            assert all(value >= 0.55 for _, _, value in current)
+            if family is None:
+                if neutral is None:
+                    neutral = current
+                assert current == neutral
+            else:
+                assert all(family[0] <= hue <= family[1] and saturation >= 0.1
+                           for hue, saturation, _ in current)
+
+        dialog.preset_buttons[3].invoke()
+        ultra = colors()
+        dialog.det_menu.set("PP-OCRv6 Small")
+        dialog._update_selection()
+        assert dialog.preset_name.cget("text") == "Tùy chỉnh"
+        assert colors() == ultra
+        dialog.flow_menu.set("Nhật → Anh → Việt")
+        dialog._update_selection()
+        assert colors() == neutral
+    finally:
+        dialog.destroy()
+
+
+def test_settings_cancels_tier_animation_when_closed(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_args: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings())
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    try:
+        dialog.preset_buttons[3].invoke()
+        dialog.interface_menu.set("Nâng cao")
+        dialog.animation_switch.toggle()
+        deadline = monotonic() + 2
+        while not dialog._appearance_job and monotonic() < deadline:
+            dashboard.update()
+            sleep(0.01)
+        job = dialog._appearance_job
+        assert job
+        assert job in dashboard.tk.call("after", "info")
+        dialog.destroy()
+        assert job not in dashboard.tk.call("after", "info")
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()
+
+
 @pytest.mark.parametrize("index", [0, 1])
 def test_flash_and_medium_lock_pivot_while_allowing_advanced_customization(panel, tmp_path, monkeypatch, index):
     from core.ocr_settings import OCRSettings
@@ -153,7 +583,12 @@ def test_flash_and_medium_lock_pivot_while_allowing_advanced_customization(panel
     assert saved.ja_model == ("nllb" if index == 0 else "mitsua")
 
 
-@pytest.mark.parametrize("index, model, label", [(2, "2b", "Qwen3.5-2B Q4_K_M"), (3, "4b", "Qwen3.5-4B Q4_K_M")])
+@pytest.mark.parametrize("index, model, label", [
+    (2, "2b", "Qwen3.5-2B Q4_K_M"),
+    (3, "4b", "Qwen3.5-4B Q4_K_M"),
+    (4, "9b", "Qwen3.5-9B Q4_K_M"),
+    (5, "27b", "Qwen3.8-27B Q4_K_M"),
+])
 def test_qwen_preset_preserves_variant_through_advanced_and_rule_changes(panel, tmp_path, monkeypatch, index, model, label):
     from core.ocr_settings import OCRSettings
     from core.qwen_rules import QwenRule
@@ -501,6 +936,51 @@ def test_recording_can_select_or_clear_a_region_inside_the_window(panel, monkeyp
     assert dashboard.auto_switch.get() == 1
 
 
+def test_three_crops_are_selected_in_order_and_previewed_without_editing(panel, monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    from core.qwen_rules import save_rule_slot
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(dashboard, "_ocr_settings", dashboard._ocr_settings)
+    monkeypatch.setattr(dashboard, "_extra_crops", {"desktop": {}, "window": {}})
+    monkeypatch.setattr(dashboard, "_desktop_area", None)
+    monkeypatch.setattr("frontend.ui._ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "fullscreen_region", lambda: (0, 0, 1000, 800))
+    rule = save_rule_slot(tmp_path, name="Character names", text="Vai trò: Tên người nói\nKeep official names.")
+    dashboard._apply_ocr_settings(replace(
+        dashboard._ocr_settings, crop_count=3, flow="direct",
+        crop_rule_slots=(rule.id, "", ""),
+    ))
+    heading, note, *rows, _actions = dashboard.crop_panel.winfo_children()
+    assert heading.cget("text") == "Quy tắc riêng từng vùng"
+    assert "ưu tiên" in note.cget("text")
+    for row in rows:
+        assert len(row.winfo_children()) == 2
+    rule_menu = rows[1].winfo_children()[1]
+    assert rule_menu.get() == "Chỉ dùng quy tắc chung"
+    picker = Mock()
+    monkeypatch.setattr("frontend.ui.RegionPicker", picker)
+    regions = ((10, 20, 140, 35), (30, 100, 300, 60), (40, 200, 320, 50))
+
+    dashboard.start_area_selection()
+    for index, region in enumerate(regions, 1):
+        assert picker.call_args.args[2].startswith(f"Crop {index}")
+        picker.call_args.args[1](region)
+    crops = dashboard._session_crops()
+    assert [crop.box(1000, 800) for crop, _, _ in crops] == [
+        (x, y, x + width, y + height) for x, y, width, height in regions
+    ]
+    assert crops[0][1:] == ("speaker", "Keep official names.")
+    assert crops[1][1:] == ("dialogue", "")
+    dashboard.start_area_selection(preview=True)
+    assert picker.call_args.kwargs["preview"] == tuple(
+        (index, crop) for index, (crop, _, _) in enumerate(crops, 1)
+    )
+    picker.call_args.args[1](None)
+    assert dashboard._session_crops() == crops
+
+
 @pytest.mark.parametrize("focus_allowed", [True, False])
 def test_recording_shows_cropped_subtitles_after_restarting_from_dashboard(panel, monkeypatch, focus_allowed):
     dashboard, session, overlay = panel
@@ -660,3 +1140,62 @@ def test_qwen_rule_manager_saves_slots_and_applies_selected_snapshot(panel, tmp_
     dialog.save_button.invoke()
     assert OCRSettings.load(tmp_path).qwen_rule == load_rule_slots(tmp_path)[0]
     assert dashboard._ocr_settings.qwen_rule == load_rule_slots(tmp_path)[0]
+
+
+
+def test_window_move_repositions_subtitles_without_restarting(panel, monkeypatch):
+    dashboard, session, overlay = panel
+    dashboard._set_live_capture_mode("window")
+    target = Mock(title="Test Game")
+    target.bounds.return_value = (10, 20, 200, 300)
+    target.is_foreground.return_value = True
+    monkeypatch.setattr(dashboard, "_create_window_live_session", Mock(return_value=session))
+    dashboard._select_live_window(target)
+    dashboard._start_live()
+
+    target.bounds.return_value = (-100, 20, 200, 300)
+    dashboard._poll_live()
+
+    session.start.assert_called_once_with((10, 20, 200, 300))
+    session.move.assert_called_once_with((-100, 20, 200, 300))
+    overlay.move.assert_called_once_with((-100, 20, 200, 300))
+
+
+def test_restarting_with_an_edited_crop_rule_recreates_session(panel, tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from core.ocr_settings import PRESETS
+    from core.qwen_rules import save_rule_slot
+
+    dashboard, original_session, _ = panel
+    monkeypatch.setattr("frontend.ui._ROOT", tmp_path)
+    monkeypatch.setattr("frontend.ui.model_items", lambda *_: [])
+    monkeypatch.setattr(dashboard, "_ocr_settings", dashboard._ocr_settings)
+    slot = save_rule_slot(tmp_path, name="Crop rule", text="Role: Dialogue")
+    dashboard._apply_ocr_settings(replace(PRESETS["High"], crop_rule_slots=(slot.id, "", "")))
+    sessions = iter((original_session, Mock()))
+    original_session.poll.return_value = None
+
+    def create_session():
+        session = next(sessions)
+        session.poll.return_value = None
+        session.role = dashboard._session_crops()[0][1]
+        return session
+
+    monkeypatch.setattr(dashboard, "_live_session_factory", Mock(side_effect=create_session))
+    try:
+        dashboard._start_live()
+        assert dashboard._live_session.role == "dialogue"
+        dashboard._stop_live()
+        dashboard._start_live()
+        assert dashboard._live_session is original_session
+        dashboard._stop_live()
+
+        save_rule_slot(tmp_path, name=slot.name, text="Role: Speaker", slot_id=slot.id)
+        dashboard._start_live()
+
+        assert dashboard._live_session.role == "speaker"
+        original_session.close.assert_called_once()
+    finally:
+        dashboard._stop_live()
+        dashboard._close_live_session()

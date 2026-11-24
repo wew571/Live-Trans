@@ -55,7 +55,7 @@ def test_live_worker_skips_provider_probes_when_loading_local_weights(monkeypatc
 def test_qwen_preset_round_trips_and_existing_settings_stay_on_the_pivot(tmp_path):
     from core.ocr_settings import OCRSettings, PRESETS
 
-    assert list(PRESETS) == ["Flash", "Medium", "High", "XHigh"]
+    assert list(PRESETS) == ["Flash", "Medium", "High", "Ultra", "Extreme", "Ultimate"]
     assert {
         name: (preset.det, preset.rec, preset.ja_model, preset.flow, preset.qwen_model)
         for name, preset in PRESETS.items()
@@ -63,7 +63,9 @@ def test_qwen_preset_round_trips_and_existing_settings_stay_on_the_pivot(tmp_pat
         "Flash": ("small", "small", "mitsua", "pivot", "4b"),
         "Medium": ("medium", "small", "nllb", "pivot", "4b"),
         "High": ("medium", "medium", "mitsua", "direct", "2b"),
-        "XHigh": ("medium", "medium", "mitsua", "direct", "4b"),
+        "Ultra": ("medium", "medium", "mitsua", "direct", "4b"),
+        "Extreme": ("medium", "medium", "mitsua", "direct", "9b"),
+        "Ultimate": ("medium", "medium", "mitsua", "direct", "27b"),
     }
     file = OCRSettings._path(tmp_path)
     file.parent.mkdir(parents=True)
@@ -72,21 +74,56 @@ def test_qwen_preset_round_trips_and_existing_settings_stay_on_the_pivot(tmp_pat
     assert legacy_pivot == OCRSettings("medium", "medium", "nllb")
     assert legacy_pivot.preset is None
     file.write_text('{"det":"medium","rec":"medium","flow":"direct"}', encoding="utf-8")
-    assert OCRSettings.load(tmp_path) == PRESETS["XHigh"]
+    assert OCRSettings.load(tmp_path) == PRESETS["Ultra"]
     direct = OCRSettings("medium", "medium", "nllb", "direct", 25000)
     direct.save(tmp_path)
     assert OCRSettings.load(tmp_path) == direct
-    assert direct.preset == "XHigh"
-    PRESETS["High"].save(tmp_path)
-    assert OCRSettings.load(tmp_path).preset == "High"
+    assert direct.preset == "Ultra"
+    for name, preset in PRESETS.items():
+        preset.save(tmp_path)
+        assert OCRSettings.load(tmp_path).preset == name
     assert OCRSettings("small", "medium", flow="direct").preset is None
-    assert PRESETS["XHigh"].qwen_context == 3000
+    assert PRESETS["Ultra"].qwen_context == 3000
     for invalid in (999, 25001, True, "3000"):
         with pytest.raises(ValueError):
             OCRSettings(flow="direct", qwen_context=invalid)
 
 
-@pytest.mark.parametrize("variant", ["2b", "4b"])
+def test_multi_crop_settings_round_trip_and_preserve_pipeline_defaults(tmp_path):
+    from core.ocr_settings import OCRSettings
+
+    configured = OCRSettings(
+        crop_count=3, history_turns=0,
+        crop_rule_slots=("rule-id", "", ""),
+    )
+    configured.save(tmp_path)
+    assert OCRSettings.load(tmp_path) == configured
+    path = OCRSettings._path(tmp_path)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored.update(crop_count=True, history_turns=1, crop_roles=["speaker", "dialogue", "dialogue"])
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    restored = OCRSettings.load(tmp_path)
+    assert (restored.crop_count, restored.history_turns) == (1, 2)
+    assert restored.crop_rule_slots == configured.crop_rule_slots
+
+
+def test_qwen_backend_defaults_to_vulkan_and_round_trips_cuda(tmp_path):
+    from core.ocr_settings import OCRSettings
+
+    defaults = OCRSettings.load(tmp_path)
+    assert defaults.qwen_backend == "vulkan"
+    configured = OCRSettings(flow="direct", qwen_backend="cuda-python")
+    configured.save(tmp_path)
+    assert OCRSettings.load(tmp_path) == configured
+    assert not configured.same_pipeline_as(OCRSettings(flow="direct"))
+    settings_path = OCRSettings._path(tmp_path)
+    stored = json.loads(settings_path.read_text(encoding="utf-8"))
+    stored["qwen_backend"] = "unknown"
+    settings_path.write_text(json.dumps(stored), encoding="utf-8")
+    assert OCRSettings.load(tmp_path).qwen_backend == "vulkan"
+
+
+@pytest.mark.parametrize("variant", ["2b", "4b", "9b", "27b"])
 def test_worker_routes_both_languages_directly_to_qwen(monkeypatch, tmp_path, client_type, child_modules, variant):
     from core import live_models
     from core.ocr_settings import OCRSettings
@@ -110,10 +147,20 @@ def test_worker_routes_both_languages_directly_to_qwen(monkeypatch, tmp_path, cl
 
             def __call__(self, texts):
                 assert texts == ["設定", "Continue", "一行目\\n二行目"]
+                self.last_token_count = 2255
                 return ["Cài đặt", "Tiếp tục", "Dòng một và hai"]
 
             def close(self):
                 pass
+
+            def translate_contextual(self, text, *, role, rules, speaker, history):
+                assert text == "バラを少しだけ"
+                assert role == "dialogue"
+                assert rules == "Giọng nhẹ nhàng."
+                assert speaker == "Curren Bouquetd'or"
+                assert history == [[speaker, "水やり", "Tưới nước."]]
+                self.last_token_count = 245
+                return "Cho xin vài bông hồng nhé."
 
         def unexpected_pivot(*args, **kwargs):
             raise AssertionError("Direct mode called a pivot model")
@@ -133,6 +180,12 @@ def test_worker_routes_both_languages_directly_to_qwen(monkeypatch, tmp_path, cl
         assert client.translate(["設定", "Continue", "一行目\n二行目"]) == [
             "Cài đặt", "Tiếp tục", "Dòng một và hai",
         ]
+        assert client.last_token_count == 2255
+        assert client.translate_contextual(
+            "バラを少しだけ", role="dialogue", rules="Giọng nhẹ nhàng.", speaker="Curren Bouquetd'or",
+            history=(("Curren Bouquetd'or", "水やり", "Tưới nước."),),
+        ) == "Cho xin vài bông hồng nhé."
+        assert client.last_token_count == 245
     finally:
         client.close()
 
@@ -157,10 +210,10 @@ def test_direct_dialogue_keeps_wrapped_lines_together_without_joining_columns():
     requests = []
     cache = OrderedDict()
     models = SimpleNamespace(translate=lambda texts: requests.append(texts) or ["Dịch"] * len(texts))
-    lines = LiveTranslationSession._translate(models, grouped, cache, preserve_line_breaks=True)
+    lines, _ = LiveTranslationSession._translate(models, grouped, cache, preserve_line_breaks=True)
     assert lines[0].box == (10, 12, 170, 56)
     assert requests == [["彼は\n来なかった。", "Separate column", "別の段落"]]
-    assert LiveTranslationSession._translate(models, grouped, cache, preserve_line_breaks=True) == lines
+    assert LiveTranslationSession._translate(models, grouped, cache, preserve_line_breaks=True) == (lines, None)
     assert len(requests) == 1
 
 
@@ -627,3 +680,31 @@ def test_close_interrupts_started_inference(monkeypatch, client_type, worker_tra
     assert len(errors) == 1
     with pytest.raises(RuntimeError, match="closed"):
         client.translate([])
+
+
+@pytest.mark.parametrize("cuda_available, missing_dll, expected_error", [
+    (False, None, "needs an NVIDIA GPU and CUDA-enabled PyTorch"),
+    (True, "cublasLt64_13.dll", "CUDA 13 libraries"),
+    (True, None, None),
+])
+def test_cuda_probe_checks_the_live_worker_environment(
+    child_modules, tmp_path, cuda_available, missing_dll, expected_error,
+):
+    from core.live_models import LiveModelError, check_qwen_cuda_worker
+
+    child_modules("torch", f"""
+        from types import SimpleNamespace
+
+        cuda = SimpleNamespace(is_available=lambda: {cuda_available!r})
+    """)
+    libraries = tmp_path / "lib"
+    libraries.mkdir()
+    for dll in ("cublas64_13.dll", "cublasLt64_13.dll"):
+        if dll != missing_dll:
+            (libraries / dll).touch()
+
+    if expected_error:
+        with pytest.raises(LiveModelError, match=expected_error):
+            check_qwen_cuda_worker()
+    else:
+        check_qwen_cuda_worker()

@@ -78,9 +78,7 @@ class LiveOverlay:
                 window.update_idletasks()
                 # Tk's client is inside the native top-level wrapper.
                 hwnd = win32gui.GetAncestor(window.winfo_id(), win32con.GA_ROOT)
-                # Tk interprets negative geometry offsets relative to the far edge.
-                win32gui.SetWindowPos(hwnd, 0, x, y, 0, 0,
-                                      win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
+                self._position(hwnd, x, y)
                 styles = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
                 win32gui.SetWindowLong(
                     hwnd, win32con.GWL_EXSTYLE,
@@ -91,6 +89,19 @@ class LiveOverlay:
         except (OSError, RuntimeError, win32gui.error):
             self.hide()
             raise
+        self.region = region
+
+    @staticmethod
+    def _position(hwnd, x, y):
+        # Tk interprets negative geometry offsets relative to the far edge.
+        win32gui.SetWindowPos(hwnd, 0, x, y, 0, 0,
+                              win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
+
+    def move(self, region):
+        x, y, _, _ = region
+        for window in (self.background_window, self.window):
+            hwnd = win32gui.GetAncestor(window.winfo_id(), win32con.GA_ROOT)
+            self._position(hwnd, x, y)
         self.region = region
 
     def set_visible(self, visible):
@@ -156,12 +167,15 @@ class LiveOverlay:
 class RegionPicker:
     """Asynchronous drag selection within screen bounds."""
 
-    def __init__(self, parent, callback, prompt, cancel_label, *, region=None):
+    def __init__(self, parent, callback, prompt, cancel_label, *, region=None, preview=None,
+                 exclude_from_capture=False):
         self.callback = callback
         self.region = region if region is not None else primary_screen_region()
         self.start = None
         self.rect = None
         self.window = tk.Toplevel(parent)
+        if exclude_from_capture:
+            self.window.withdraw()
         self.window.overrideredirect(True)
         self.window.attributes("-topmost", True)
         self.window.attributes("-alpha", 0.5)
@@ -175,9 +189,12 @@ class RegionPicker:
         self.canvas.create_text(
             20, 20, anchor="nw", text=prompt, font=("Segoe UI", 14, "bold"), fill="white"
         )
-        self.canvas.bind("<Button-1>", self._press)
-        self.canvas.bind("<B1-Motion>", self._drag)
-        self.canvas.bind("<ButtonRelease-1>", self._release)
+        if preview is None:
+            self.canvas.bind("<Button-1>", self._press)
+            self.canvas.bind("<B1-Motion>", self._drag)
+            self.canvas.bind("<ButtonRelease-1>", self._release)
+        else:
+            self.canvas.bind("<Configure>", lambda event: self._draw_preview(event, preview))
         cancel = tk.Button(
             self.window, name="cancel", text=cancel_label, command=lambda: self._finish(None),
             bg="#313244", fg="#ffffff", activebackground="#45475a", activeforeground="#ffffff",
@@ -185,12 +202,34 @@ class RegionPicker:
         )
         cancel.place(relx=1, rely=1, x=-12, y=-12, anchor="se")
         self.window.protocol("WM_DELETE_WINDOW", lambda: self._finish(None))
+        if preview is not None:
+            self.window.bind("<Escape>", lambda _event: self._finish(None))
         self.window.update_idletasks()
         hwnd = win32gui.GetAncestor(self.window.winfo_id(), win32con.GA_ROOT)
         win32gui.SetWindowPos(hwnd, 0, x, y, 0, 0,
                               win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
+        if exclude_from_capture:
+            try:
+                set_capture_exclusion(self.window)
+            except (OSError, RuntimeError):
+                self.close()
+                raise
+            self.window.deiconify()
         self.window.grab_set()
         self.window.focus_force()
+
+    def _draw_preview(self, event, preview):
+        self.canvas.delete("crop-preview")
+        for index, crop in preview:
+            left, top, right, bottom = crop.box(event.width, event.height)
+            self.canvas.create_rectangle(
+                left, top, right, bottom, outline="#89b4fa", width=4,
+                fill=_TRANSPARENT_COLOR, tags="crop-preview",
+            )
+            self.canvas.create_text(
+                left + 8, top + 5, text=f"Crop {index}", anchor="nw",
+                fill="#89b4fa", font=("Segoe UI", 16, "bold"), tags="crop-preview",
+            )
 
     def _press(self, event):
         self.start = (event.x, event.y)

@@ -77,6 +77,32 @@ def _worker_environment():
     return env
 
 
+def check_qwen_cuda_worker() -> None:
+    """Check PyTorch in the live worker environment without loading a model."""
+    env = _worker_environment()
+    executable = env.get("MANGALENS_LIVE_PYTHON") or sys.executable
+    probe = (
+        "try:\n"
+        "    from core.live_qwen_cuda import check_cuda_torch\n"
+        "    check_cuda_torch()\n"
+        "except Exception as error:\n"
+        "    raise SystemExit(str(error))"
+    )
+    try:
+        result = subprocess.run(
+            [executable, "-c", probe], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=env, cwd=_ROOT, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            encoding="utf-8", errors="replace", timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise LiveModelError("The CUDA compatibility check timed out.") from error
+    except OSError as error:
+        raise LiveModelError(f"Could not start the live inference worker. {error}") from error
+    if result.returncode:
+        lines = result.stdout.strip().splitlines()
+        raise LiveModelError(lines[-1] if lines else "The CUDA compatibility check failed.")
+
+
 class LiveModelClient:
     """Run OCR and translation synchronously on one inference thread.
 
@@ -90,6 +116,7 @@ class LiveModelClient:
         self._lock = Lock()
         self._process = None
         self._closed = False
+        self.last_token_count: int | None = None
 
     def ocr(self, frame: np.ndarray) -> list[tuple[tuple[int, int, int, int], str]]:
         import numpy as np
@@ -131,8 +158,16 @@ class LiveModelClient:
         return result
 
     def translate(self, texts: list[str]) -> list[str]:
+        return self._translate(texts)
+
+    def translate_contextual(self, text: str, *, role: str, rules: str, speaker: str, history) -> str:
+        context = {"role": role, "rules": rules, "speaker": speaker, "history": history}
+        return self._translate([text], context)[0]
+
+    def _translate(self, texts: list[str], context=None) -> list[str]:
         if not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
             raise TypeError("Live translation expects a list of strings")
+        self.last_token_count = None
         if not texts:
             with self._lock:
                 if self._closed:
@@ -142,10 +177,12 @@ class LiveModelClient:
         if self._ocr_settings.flow == FLOW_DIRECT:
             metadata.update(
                 flow=FLOW_DIRECT, qwen_context=self._ocr_settings.qwen_context,
-                qwen_model=self._ocr_settings.qwen_model,
+                qwen_model=self._ocr_settings.qwen_model, qwen_backend=self._ocr_settings.qwen_backend,
             )
             if self._ocr_settings.qwen_rule is not None:
                 metadata["qwen_rules"] = self._ocr_settings.qwen_rule.text
+            if context is not None:
+                metadata["context"] = context
         result = self._request(metadata)
         if not _is_translation_batch(result, len(texts)):
             self._invalid_response("the translator must return one string per input")
@@ -208,6 +245,10 @@ class LiveModelClient:
             raise LiveModelError(f"Live {operation} failed: {message['error']}")
         if message.get("ok") is not True or "result" not in message or data:
             self._invalid_response("invalid response packet")
+        if operation == "translate" and self._ocr_settings.flow == FLOW_DIRECT:
+            count = message.get("token_count")
+            if type(count) is int and count >= 0:
+                self.last_token_count = count
         return message["result"]
 
     def _invalid_response(self, reason):

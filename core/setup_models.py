@@ -16,9 +16,13 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 from zipfile import ZipFile, is_zipfile
 
-from core.ocr_settings import DEFAULT_JA_MODEL, FLOW_DIRECT, JA_MODEL_KEYS, OCR_SIZES, OCRSettings, ocr_model_key
+from core.ocr_settings import (
+    DEFAULT_JA_MODEL, FLOW_DIRECT, JA_MODEL_KEYS, OCR_SIZES,
+    QWEN_2B, QWEN_4B, QWEN_9B, QWEN_27B, QWEN_BACKEND_CUDA_PYTHON, QWEN_MODEL_LABELS,
+    OCRSettings, ocr_model_key,
+)
 from core.setup_environment import read_setup_environment
-from core.setup_types import DownloadInterrupted, InstallationItem, Progress
+from core.setup_types import DownloadInterrupted, InstallationItem, InstallLog, Progress
 
 
 _MITSUA = "Mitsua/elan-mt-bt-ja-en"
@@ -26,7 +30,10 @@ _NLLB = "facebook/nllb-200-distilled-600M"
 _VINAI = "vinai/vinai-translate-en2vi-v2"
 QWEN_MODEL_KEY = "live-translate-qwen"
 QWEN_2B_MODEL_KEY = "live-translate-qwen-2b"
+QWEN_9B_MODEL_KEY = "live-translate-qwen-9b"
+QWEN_27B_MODEL_KEY = "live-translate-qwen-27b"
 QWEN_RUNTIME_KEY = "live-qwen-runtime"
+QWEN_CUDA_RUNTIME_KEY = "live-qwen-cuda-runtime"
 _QWEN_MODEL = "Qwen3.5-4B-Q4_K_M.gguf"
 _QWEN_MODEL_URL = f"https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/main/{_QWEN_MODEL}"
 _QWEN_RUNTIME_RELEASE = "b12621"
@@ -36,6 +43,36 @@ _RUNTIME_REQUIRED = {
     "llama-server.exe", "llama-server-impl.dll", "llama-common.dll", "llama.dll",
     "ggml-base.dll", "ggml-vulkan.dll", "ggml.dll", "mtmd.dll",
 }
+_QWEN_CUDA_RELEASE = "0.3.37-cu132"
+_QWEN_CUDA_WHEEL = "llama_cpp_python-0.3.37-py3-none-win_amd64.whl"
+_QWEN_CUDA_WHEEL_URL = (
+    f"https://github.com/abetlen/llama-cpp-python/releases/download/v{_QWEN_CUDA_RELEASE}/{_QWEN_CUDA_WHEEL}"
+)
+# b12387 is the llama.cpp commit included in the Python wheel. The official
+# wheel's CPU DLL uses AVX-512, so deploy the matching upstream AVX2 variant.
+_QWEN_CUDA_CPU_ZIP = "llama-b12387-bin-win-cpu-x64.zip"
+_QWEN_CUDA_CPU_URL = f"https://github.com/ggml-org/llama.cpp/releases/download/b12387/{_QWEN_CUDA_CPU_ZIP}"
+_QWEN_CUDA_CPU_FILES = {
+    "ggml-cpu-haswell.dll": "ggml-cpu.dll",
+    "libomp.dll": "libomp.dll",
+    "LICENSE-LLVM-OpenMP": "LICENSE-LLVM-OpenMP",
+}
+_QWEN_CUDA_REQUIRED = (
+    "python/llama_cpp/__init__.py",
+    "python/llama_cpp/lib/llama.dll",
+    "python/llama_cpp/lib/mtmd.dll",
+    "python/llama_cpp/lib/ggml.dll",
+    "python/llama_cpp/lib/ggml-base.dll",
+    "python/llama_cpp/lib/ggml-cpu.dll",
+    "python/llama_cpp/lib/ggml-cuda.dll",
+    "python/llama_cpp/lib/libomp.dll",
+    "python/llama_cpp/lib/LICENSE-LLVM-OpenMP",
+    "python/diskcache/__init__.py",
+    "python/jinja2/__init__.py",
+    "python/markupsafe/__init__.py",
+    "python/typing_extensions.py",
+)
+_QWEN_CUDA_LABEL = "llama-cpp-python CUDA (Qwen)"
 _OPTIONAL_MODEL_KEYS = {
     JA_MODEL_KEYS["nllb"], ocr_model_key("det", "medium"), ocr_model_key("rec", "medium"),
 }
@@ -87,13 +124,25 @@ class _RemoteFile:
 
 _QWEN_MODEL_ASSET = _RemoteFile(3032091584, "217002fa8008ef4fc6d548353a3aebef055a96e6ff8e0e2c0953ef8254a89c14")
 _QWEN_2B_MODEL_ASSET = _RemoteFile(1312165056, "a8b50de00b780c0f3c16f07cb041a1ecd678b6e22fd8cde91e57fe4b5031523b")
+_QWEN_9B_MODEL_ASSET = _RemoteFile(5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8")
+_QWEN_27B_MODEL_ASSET = _RemoteFile(19403684480, "d15d4b6de55f662ac40e867702d31afe738d032fa06b829b2b1a21a49d4a48ee")
 _QWEN_VARIANTS = {
-    "4b": (QWEN_MODEL_KEY, _QWEN_MODEL, _QWEN_MODEL_URL, _QWEN_MODEL_ASSET),
-    "2b": (QWEN_2B_MODEL_KEY, "Qwen3.5-2B-Q4_K_M.gguf",
-           "https://huggingface.co/SoAIHQ/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
-           _QWEN_2B_MODEL_ASSET),
+    QWEN_4B: (QWEN_MODEL_KEY, _QWEN_MODEL, _QWEN_MODEL_URL, _QWEN_MODEL_ASSET),
+    QWEN_2B: (QWEN_2B_MODEL_KEY, "Qwen3.5-2B-Q4_K_M.gguf",
+              "https://huggingface.co/SoAIHQ/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+              _QWEN_2B_MODEL_ASSET),
+    QWEN_9B: (QWEN_9B_MODEL_KEY, "Qwen3.5-9B-Q4_K_M.gguf",
+              "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/"
+              "Qwen3.5-9B-Q4_K_M.gguf",
+              _QWEN_9B_MODEL_ASSET),
+    QWEN_27B: (QWEN_27B_MODEL_KEY, "Qwen3.8-27B-Q4_K_M.gguf",
+               "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/resolve/c1869413dece09109e55b7dcc2c77ef382b0d0bd/"
+               "Qwen3.8-27B-Q4_K_M.gguf",
+               _QWEN_27B_MODEL_ASSET),
 }
 _QWEN_RUNTIME_ASSET = _RemoteFile(38871144, "38c58fe8b3eb5bfb892d02e9b67349a1ee8eb5d1bf81c0fb4894a2d7ebaf1e4d")
+_QWEN_CUDA_WHEEL_ASSET = _RemoteFile(261129399, "ba1afbd5b7f5010cdb4c3312a504eac7e562b7aae34c8d16c4f5b7e1d761ecab")
+_QWEN_CUDA_CPU_ASSET = _RemoteFile(25124944, "ced8482efac76c5f24398b97a6fe1662109038ec3b880686fd7c7c8f22bc5d99")
 
 
 def _path(root: Path, value: str | Path) -> Path:
@@ -223,7 +272,7 @@ def resolve_model(root: Path, key: str) -> str:
     return model.source
 
 
-def qwen_model_path(root: Path, variant: str = "4b") -> Path:
+def qwen_model_path(root: Path, variant: str = QWEN_4B) -> Path:
     return root / "model" / _QWEN_VARIANTS[variant][1]
 
 
@@ -231,11 +280,27 @@ def qwen_server_path(root: Path) -> Path:
     return root / "models" / "live-qwen-runtime" / f"{_QWEN_RUNTIME_RELEASE}-vulkan" / "llama-server.exe"
 
 
+def qwen_cuda_runtime_path(root: Path) -> Path:
+    return root / "models" / "live-qwen-runtime" / f"llama-cpp-python-{_QWEN_CUDA_RELEASE}-avx2"
+
+
+def qwen_cuda_runtime_ready(root: Path) -> bool:
+    directory = qwen_cuda_runtime_path(root)
+    try:
+        files = json.loads((directory / "installed.json").read_text(encoding="utf-8"))
+        return isinstance(files, dict) and all(
+            type(files.get(name)) is int and files[name] > 0 and _same_size(directory / name, files[name])
+            for name in _QWEN_CUDA_REQUIRED
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def _qwen_runtime_archive(root: Path) -> Path:
     return qwen_server_path(root).parent.parent / _QWEN_RUNTIME_ZIP
 
 
-def _qwen_model_ready(root: Path, variant: str = "4b") -> bool:
+def _qwen_model_ready(root: Path, variant: str = QWEN_4B) -> bool:
     path = qwen_model_path(root, variant)
     if not _same_size(path, _QWEN_VARIANTS[variant][3].size):
         return False
@@ -262,7 +327,7 @@ def _qwen_runtime_ready(root: Path) -> bool:
         return False
 
 
-def _install_qwen_model(root: Path, progress: Progress, variant: str = "4b") -> None:
+def _install_qwen_model(root: Path, progress: Progress, variant: str = QWEN_4B) -> None:
     if not _qwen_model_ready(root, variant):
         _, _, url, asset = _QWEN_VARIANTS[variant]
         _download({}, url, asset, qwen_model_path(root, variant), lambda amount: progress(amount, asset.size))
@@ -298,6 +363,46 @@ def _install_qwen_runtime(root: Path, progress: Progress) -> None:
         (stage / manifest.name).replace(manifest)
 
 
+def _install_qwen_cuda_runtime(root: Path, progress: Progress, log: InstallLog | None = None) -> None:
+    from core.setup_libraries import _live_executable, _pip, _replace_runtime
+
+    if qwen_cuda_runtime_ready(root):
+        return
+    directory = qwen_cuda_runtime_path(root)
+    wheel = directory.parent / _QWEN_CUDA_WHEEL
+    archive = directory.parent / _QWEN_CUDA_CPU_ZIP
+    wheel_size = _QWEN_CUDA_WHEEL_ASSET.size
+    total = wheel_size + _QWEN_CUDA_CPU_ASSET.size
+    _download({}, _QWEN_CUDA_WHEEL_URL, _QWEN_CUDA_WHEEL_ASSET, wheel, lambda amount: progress(amount, total))
+    _download({}, _QWEN_CUDA_CPU_URL, _QWEN_CUDA_CPU_ASSET, archive, lambda amount: progress(wheel_size + amount, total))
+
+    executable = _live_executable(root, read_setup_environment(root))
+    with TemporaryDirectory(dir=directory.parent, prefix=".qwen-cuda-") as temporary:
+        stage = Path(temporary) / "runtime"
+        package = stage / "python"
+        stage.mkdir()
+        _pip(
+            executable, [
+                "--target", str(package), "--only-binary=:all:", "--no-deps", str(wheel),
+                "diskcache==5.6.3", "Jinja2==3.1.6", "MarkupSafe==3.0.4", "typing-extensions==4.16.0",
+            ], root, progress, _QWEN_CUDA_LABEL, log,
+        )
+        native = package / "llama_cpp" / "lib"
+        with ZipFile(archive) as bundle:
+            for source_name, target_name in _QWEN_CUDA_CPU_FILES.items():
+                with bundle.open(source_name) as source, (native / target_name).open("wb") as target:
+                    copyfileobj(source, target)
+        files = {}
+        for name in _QWEN_CUDA_REQUIRED:
+            file = stage / name
+            if not file.is_file() or (size := file.stat().st_size) == 0:
+                raise RuntimeError(f"Incomplete {_QWEN_CUDA_LABEL} installation: missing {name}.")
+            files[name] = size
+        (stage / "installed.json").write_text(json.dumps(files), encoding="utf-8")
+        _replace_runtime(directory, stage)
+        progress(total, total)
+
+
 def model_items(
     root: Path, ocr_settings: OCRSettings | None = None, *, include_optional: bool = False,
 ) -> list[InstallationItem]:
@@ -310,7 +415,8 @@ def model_items(
         ocr_model_key("det", settings.det), ocr_model_key("rec", settings.rec),
     }
     if settings.flow == FLOW_DIRECT:
-        selected.update({_QWEN_VARIANTS[settings.qwen_model][0], QWEN_RUNTIME_KEY})
+        runtime_key = QWEN_CUDA_RUNTIME_KEY if settings.qwen_backend == QWEN_BACKEND_CUDA_PYTHON else QWEN_RUNTIME_KEY
+        selected.update({_QWEN_VARIANTS[settings.qwen_model][0], runtime_key})
     else:
         selected.update({JA_MODEL_KEYS[settings.ja_model], "live-translate-en-vi"})
 
@@ -331,18 +437,24 @@ def model_items(
         for model in _model_specs(root).values()
         if model.key in selected or include_optional
     ]
-    for key, label, ready, install_qwen_item in (
-        (QWEN_MODEL_KEY, "Qwen3.5-4B Q4_K_M", _qwen_model_ready, _install_qwen_model),
-        (QWEN_2B_MODEL_KEY, "Qwen3.5-2B Q4_K_M",
-         partial(_qwen_model_ready, variant="2b"), partial(_install_qwen_model, variant="2b")),
-        (QWEN_RUNTIME_KEY, "llama.cpp Vulkan (Qwen)", _qwen_runtime_ready, _install_qwen_runtime),
-    ):
+    for variant, (key, _, _, _) in _QWEN_VARIANTS.items():
         if key in selected or include_optional:
             items.append(InstallationItem(
-                key, label, "model", lambda ready=ready: ready(root),
-                lambda progress, install_qwen_item=install_qwen_item: install_qwen_item(root, progress),
+                key, QWEN_MODEL_LABELS[variant], "model", partial(_qwen_model_ready, root, variant),
+                partial(_install_qwen_model, root, variant=variant),
                 optional=key not in selected,
             ))
+    if QWEN_RUNTIME_KEY in selected or include_optional:
+        items.append(InstallationItem(
+            QWEN_RUNTIME_KEY, "llama.cpp Vulkan (Qwen)", "model", partial(_qwen_runtime_ready, root),
+            partial(_install_qwen_runtime, root), optional=QWEN_RUNTIME_KEY not in selected,
+        ))
+    if QWEN_CUDA_RUNTIME_KEY in selected or include_optional:
+        installer = partial(_install_qwen_cuda_runtime, root)
+        items.append(InstallationItem(
+            QWEN_CUDA_RUNTIME_KEY, _QWEN_CUDA_LABEL, "model", partial(qwen_cuda_runtime_ready, root),
+            installer, installer, optional=QWEN_CUDA_RUNTIME_KEY not in selected,
+        ))
     return items
 
 

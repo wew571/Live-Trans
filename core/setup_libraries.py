@@ -28,6 +28,7 @@ _PADDLE = {"paddleocr", "paddlex", _OPENCV}
 _PADDLE_CPU = "paddlepaddle"
 _PADDLE_GPU = "paddlepaddle-gpu"
 _TORCH = {"torch", "torchvision"}
+_OPTIONAL_MAIN = {"pywebview"}
 _NETWORK_FAILURE = re.compile(
     r"(?:time(?:d)? ?out|readtimeout|connecttimeout|connection (?:reset|aborted|refused|broken)|"
     r"remote end closed|incomplete ?read|broken pipe|network is unreachable|"
@@ -361,8 +362,23 @@ def _install_worker_torch(root, torch_pins, label, progress, log=None):
     progress(1, 1)
 
 
-def _library_item(key, label, is_ready, install):
-    return InstallationItem(key, label, "library", is_ready, install, install_with_log=install)
+def _library_item(key, label, is_ready, install, *, optional=False):
+    return InstallationItem(key, label, "library", is_ready, install, install_with_log=install, optional=optional)
+
+
+def _main_library_item(root, pin, constraints, no_deps=False):
+    label = f"{pin.name} ({APP_NAME})"
+    return _library_item(
+        f"main:{pin.name}", label, partial(_pinned, pin),
+        partial(_install_main, root, label, [pin], constraints, no_deps),
+        optional=pin.name in _OPTIONAL_MAIN,
+    )
+
+
+def optional_library_items(root: Path) -> list[InstallationItem]:
+    manifest = root / "requirements.txt"
+    pins = _read_pins(manifest) if manifest.is_file() else []
+    return [_main_library_item(root, pin, pins) for pin in pins if pin.name in _OPTIONAL_MAIN]
 
 
 def library_items(root: Path) -> list[InstallationItem]:
@@ -381,11 +397,7 @@ def library_items(root: Path) -> list[InstallationItem]:
     for pin in [*main_pins, *no_deps_pins]:
         if pin.name in _TORCH:
             continue
-        label = f"{pin.name} ({APP_NAME})"
-        items.append(_library_item(
-            f"main:{pin.name}", label, partial(_pinned, pin),
-            partial(_install_main, root, label, [pin], main_pins, pin in no_deps_pins),
-        ))
+        items.append(_main_library_item(root, pin, main_pins, pin in no_deps_pins))
     if live_pins:
         runtime = root / "models" / "live-runtime"
         if torch_pins and _live_executable(root, read_setup_environment(root)) != sys.executable:

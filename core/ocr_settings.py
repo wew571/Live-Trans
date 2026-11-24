@@ -1,6 +1,6 @@
 """Persist Live Trans model selections in the existing settings file."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -11,15 +11,31 @@ OCR_SIZES = ("small", "medium")
 DEFAULT_JA_MODEL = "mitsua"
 FLOW_PIVOT = "pivot"
 FLOW_DIRECT = "direct"
+INTERFACE_MINIMAL = "minimal"
+INTERFACE_ADVANCED = "advanced"
+_SETTINGS_INTERFACES = (INTERFACE_MINIMAL, INTERFACE_ADVANCED)
 QWEN_2B = "2b"
 QWEN_4B = "4b"
+QWEN_9B = "9b"
+QWEN_27B = "27b"
 QWEN_MODEL_LABELS = {
     QWEN_2B: "Qwen3.5-2B Q4_K_M",
     QWEN_4B: "Qwen3.5-4B Q4_K_M",
+    QWEN_9B: "Qwen3.5-9B Q4_K_M",
+    QWEN_27B: "Qwen3.8-27B Q4_K_M",
 }
 QWEN_CONTEXT_MIN = 1000
 QWEN_CONTEXT_MAX = 25000
 QWEN_CONTEXT_DEFAULT = 3000
+QWEN_BACKEND_VULKAN = "vulkan"
+QWEN_BACKEND_CUDA_PYTHON = "cuda-python"
+QWEN_BACKEND_LABELS = {
+    QWEN_BACKEND_VULKAN: "llama.cpp Vulkan",
+    QWEN_BACKEND_CUDA_PYTHON: "llama-cpp-python CUDA",
+}
+CROP_COUNTS = (1, 2, 3)
+HISTORY_LENGTHS = (0, 2, 3)
+_DEFAULT_CROP_RULE_SLOTS = ("",) * len(CROP_COUNTS)
 JA_MODEL_KEYS = {
     DEFAULT_JA_MODEL: "translate-ja-en",
     "nllb": "translate-ja-en-nllb",
@@ -39,6 +55,12 @@ class OCRSettings:
     qwen_context: int = QWEN_CONTEXT_DEFAULT
     qwen_rule: QwenRule | None = None
     qwen_model: str = QWEN_4B
+    animation_enabled: bool = False
+    settings_interface: str = INTERFACE_MINIMAL
+    crop_count: int = 1
+    history_turns: int = 2
+    crop_rule_slots: tuple[str, ...] = _DEFAULT_CROP_RULE_SLOTS
+    qwen_backend: str = QWEN_BACKEND_VULKAN
 
     def __post_init__(self):
         if self.det not in OCR_SIZES or self.rec not in OCR_SIZES:
@@ -53,6 +75,23 @@ class OCRSettings:
             raise ValueError("Invalid Qwen rule.")
         if not isinstance(self.qwen_model, str) or self.qwen_model not in QWEN_MODEL_LABELS:
             raise ValueError("Unknown Qwen translation model.")
+        if not isinstance(self.animation_enabled, bool):
+            raise ValueError("Animation must be enabled or disabled.")
+        if self.settings_interface not in _SETTINGS_INTERFACES:
+            raise ValueError("Unknown settings interface.")
+        if type(self.crop_count) is not int or self.crop_count not in CROP_COUNTS:
+            raise ValueError("Choose one to three crop regions.")
+        if type(self.history_turns) is not int or self.history_turns not in HISTORY_LENGTHS:
+            raise ValueError("Choose zero, two or three previous dialogue turns.")
+        if self.crop_rule_slots != _crop_values(self.crop_rule_slots, _DEFAULT_CROP_RULE_SLOTS):
+            raise ValueError("Invalid crop rule slots.")
+        if not isinstance(self.qwen_backend, str) or self.qwen_backend not in QWEN_BACKEND_LABELS:
+            raise ValueError("Unknown Qwen backend.")
+
+    def same_pipeline_as(self, other: "OCRSettings") -> bool:
+        return replace(
+            self, animation_enabled=other.animation_enabled, settings_interface=other.settings_interface,
+        ) == other
 
     @property
     def preset(self) -> str | None:
@@ -87,9 +126,21 @@ class OCRSettings:
                 qwen_model = values.get("qwen_model")
                 if not isinstance(qwen_model, str) or qwen_model not in QWEN_MODEL_LABELS:
                     qwen_model = QWEN_4B
+                interface = values.get("settings_interface")
+                crop_count = values.get("crop_count")
+                history_turns = values.get("history_turns")
+                backend = values.get("qwen_backend")
+                if not isinstance(backend, str) or backend not in QWEN_BACKEND_LABELS:
+                    backend = QWEN_BACKEND_VULKAN
                 return cls(
                     values.get("det", "small"), values.get("rec", "small"),
                     ja_model, flow, context, rule, qwen_model,
+                    animation_enabled=values.get("animation_enabled") is True,
+                    settings_interface=interface if interface in _SETTINGS_INTERFACES else INTERFACE_MINIMAL,
+                    crop_count=crop_count if type(crop_count) is int and crop_count in CROP_COUNTS else 1,
+                    history_turns=history_turns if type(history_turns) is int and history_turns in HISTORY_LENGTHS else 2,
+                    crop_rule_slots=_crop_values(values.get("crop_rule_slots"), _DEFAULT_CROP_RULE_SLOTS),
+                    qwen_backend=backend,
                 )
         except (OSError, ValueError, TypeError):
             pass
@@ -113,9 +164,20 @@ def _valid_context(context) -> bool:
     return type(context) is int and QWEN_CONTEXT_MIN <= context <= QWEN_CONTEXT_MAX
 
 
+def _crop_values(values, defaults):
+    if not isinstance(values, (list, tuple)) or len(values) != len(defaults):
+        return defaults
+    return tuple(
+        value if isinstance(value, str) else default
+        for value, default in zip(values, defaults, strict=True)
+    )
+
+
 PRESETS = {
     "Flash": OCRSettings(),
     "Medium": OCRSettings(det="medium", rec="small", ja_model="nllb"),
     "High": OCRSettings("medium", "medium", flow=FLOW_DIRECT, qwen_model=QWEN_2B),
-    "XHigh": OCRSettings("medium", "medium", flow=FLOW_DIRECT),
+    "Ultra": OCRSettings("medium", "medium", flow=FLOW_DIRECT),
+    "Extreme": OCRSettings("medium", "medium", flow=FLOW_DIRECT, qwen_model=QWEN_9B),
+    "Ultimate": OCRSettings("medium", "medium", flow=FLOW_DIRECT, qwen_model=QWEN_27B),
 }

@@ -10,3 +10,4 @@ keyboard==0.13.5
 mss==10.1.0
 pywin32==312
 python-dotenv==1.2.2
+pywebview==6.2.1  # Optional settings window

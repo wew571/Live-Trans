@@ -49,7 +49,7 @@ Trong cửa sổ **Thiết lập Live Trans**:
 
 1. Ở mục **Thư viện Python**, bấm **Chọn tất cả** rồi **Cài thư viện đã chọn**. Chờ quá trình cài hoàn tất.
 2. Ở mục **Mô hình**, bấm **Chọn tất cả** rồi **Cài mô hình đã chọn**. Nhóm này gồm PP-OCRv6 Small (det và rec), Mitsua ElanMT và VinAI Translate v2.
-3. Mục **Mô hình bổ sung** cho phép cài PP-OCRv6 Medium det, PP-OCRv6 Medium rec, NLLB-200 Distilled 600M, các bản Qwen3.5 Q4_K_M (2B và 4B) và runtime llama.cpp dùng chung. Sau khi các mục bắt buộc sẵn sàng, bấm **Tiếp tục** để mở ứng dụng. Bạn có thể mở lại **Thiết lập** từ màn hình chính.
+3. Mục **Mô hình bổ sung** cho phép cài PP-OCRv6 Medium det, PP-OCRv6 Medium rec, NLLB-200 Distilled 600M, các bản Qwen3.5 Q4_K_M (2B, 4B và 9B), Qwen3.8-27B Q4_K_M và runtime llama.cpp dùng chung. Sau khi các mục bắt buộc sẵn sàng, bấm **Tiếp tục** để mở ứng dụng. Bạn có thể mở lại **Thiết lập** từ màn hình chính.
 
 Những lần sau, mở PowerShell tại thư mục dự án và chạy lại `py -3.12 main.py`.
 
@@ -69,6 +69,14 @@ Những lần sau, mở PowerShell tại thư mục dự án và chạy lại `p
 
 Phím backtick (`` ` ``) dùng để bắt đầu hoặc dừng dịch. Bấm **Xóa đè** để xóa phụ đề đang hiển thị hoặc **Hủy** để thoát thao tác chọn vùng.
 
+### Dịch nhiều vùng và giữ ngữ cảnh
+
+Chọn từ một đến ba vùng trong **Cài đặt**. Trên màn chính, chọn vùng theo thứ tự và dùng khung xem trước để kiểm tra vị trí. Bạn có thể sửa từng vùng riêng. Vùng trống hoặc chưa đổi chữ được bỏ qua, còn bản dịch mới hiện ngay tại vùng tương ứng.
+
+Với **High** trở lên, các vùng dùng chung một phiên Qwen. Để Crop 1 đọc tên nhân vật, tạo slot quy tắc có dòng đầu là `Vai trò: Tên người nói` rồi gán slot đó cho Crop 1. Crop 2 mặc định xử lý lời thoại và dùng tên đã đọc khi dịch. Có thể viết `Vai trò: Lời thoại` để chỉ định rõ vai trò này trong một slot. Khi có chỉ dẫn khác nhau, quy tắc riêng được ưu tiên cho vùng đang dịch.
+
+Ngữ cảnh mặc định giữ hai lượt thoại gần nhất, gồm tên người nói, câu gốc và bản dịch. Trong **Cài đặt**, bạn có thể tăng lên ba lượt hoặc tắt lịch sử. Dùng **Xóa ngữ cảnh** trên màn chính khi bắt đầu đoạn hội thoại mới.
+
 ### Chọn mức dịch
 
 Trong **Cài đặt**, chọn mức bằng thanh trượt.
@@ -76,13 +84,21 @@ Trong **Cài đặt**, chọn mức bằng thanh trượt.
 - **Flash** dùng OCR Small cho cả det và rec, Mitsua ElanMT và VinAI Translate v2.
 - **Medium** dùng OCR Medium det và Small rec, NLLB-200 Distilled 600M và VinAI Translate v2.
 - **High** dùng OCR Medium cho cả det và rec, rồi dùng Qwen3.5-2B Q4_K_M để dịch trực tiếp cả tiếng Nhật lẫn tiếng Anh sang tiếng Việt.
-- **XHigh** dùng OCR Medium cho cả det và rec, rồi dùng Qwen3.5-4B Q4_K_M để dịch trực tiếp cả tiếng Nhật lẫn tiếng Anh sang tiếng Việt.
+- **Ultra** dùng OCR Medium cho cả det và rec, rồi dùng Qwen3.5-4B Q4_K_M để dịch trực tiếp cả tiếng Nhật lẫn tiếng Anh sang tiếng Việt.
+- **Extreme** dùng OCR Medium cho det và rec, với Qwen3.5-9B Q4_K_M để dịch Nhật → Việt hoặc Anh → Việt.
+- **Ultimate** dùng OCR Medium cho det và rec, với Qwen3.8-27B Q4_K_M để dịch Nhật → Việt hoặc Anh → Việt.
 
-Mục **Nâng cao** cho phép chọn riêng det, rec và model Nhật → Anh. Trong **Flash** và **Medium**, luồng Nhật → Anh → Việt được cố định, còn đầu vào tiếng Anh đi thẳng tới VinAI. **High** và **XHigh** dùng chung tùy chọn context từ **1.000 đến 25.000 token**, mặc định **3.000**, và cùng thư viện quy tắc. Context lớn hơn có thể cần thêm VRAM.
+Mục **Nâng cao** cho phép chọn riêng det, rec và model Nhật → Anh. Trong **Flash** và **Medium**, luồng Nhật → Anh → Việt được cố định, còn đầu vào tiếng Anh đi thẳng tới VinAI. **High**, **Ultra**, **Extreme** và **Ultimate** dùng chung tùy chọn context từ **1.000 đến 25.000 token**, mặc định **3.000**, và cùng thư viện quy tắc. Context lớn hơn có thể cần thêm VRAM.
+
+Trong luồng Qwen, **Nâng cao → Backend Qwen** mặc định dùng **llama.cpp Vulkan**. Để thử **llama-cpp-python CUDA**, cài mục bổ sung **llama-cpp-python CUDA (Qwen)** trong **Thiết lập**, rồi chọn backend và bấm **Lưu**. Backend CUDA dùng lại model GGUF hiện có và cần GPU NVIDIA, PyTorch có thư viện CUDA 13 cùng đủ VRAM cho model và OCR.
 
 Trong luồng Qwen, mở **Quản lý quy tắc** để lưu từng bộ quy tắc theo slot có tên. Chọn slot hoặc chọn **Không dùng quy tắc**, rồi bấm **Lưu** trong **Cài đặt** để áp dụng ở lần **Bắt đầu** tiếp theo. Các slot được lưu cục bộ trong `models/live-ocr/qwen-rules/`.
 
 Khi Cài đặt báo thiếu model hoặc runtime, đóng cửa sổ đó, mở **Thiết lập** từ màn hình chính rồi tải các mục được liệt kê. Quay lại **Cài đặt** để chọn và lưu mức. Nếu đang dịch, Live Trans dừng phiên hiện tại và dùng cấu hình đã lưu ở lần **Bắt đầu** tiếp theo.
+
+Mục **Giao diện** có hai chế độ. **Tối giản** là mặc định và mở cửa sổ Cài đặt trực tiếp trong app. **Nâng cao** mở giao diện WebView2 với công tắc **Animation**. Sau khi bấm **Lưu**, cửa sổ dùng giao diện đã chọn ở lần mở tiếp theo.
+
+Chế độ **Nâng cao** dùng thư viện tùy chọn **pywebview**, cài trong mục **Thư viện Python** của **Thiết lập**, và **Microsoft Edge WebView2 Runtime**. Nếu máy thiếu runtime, có thể cài từ [Microsoft](https://developer.microsoft.com/microsoft-edge/webview2/#download-section). Giao diện dùng các file đi kèm app và chạy offline. Nếu WebView2 chưa sẵn sàng, app mở cửa sổ Cài đặt trực tiếp.
 
 ## Ảnh minh họa
 
@@ -103,7 +119,7 @@ Phụ đề tiếng Việt hiển thị trên lời thoại tiếng Nhật trong
 1. **PP-OCRv6** phát hiện vùng chữ và đọc nội dung trong ảnh. Mặc định dùng Small cho cả hai bước. [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
 2. **Mitsua ElanMT** hoặc **NLLB-200 Distilled 600M** dịch tiếng Nhật sang tiếng Anh. NLLB là lựa chọn bổ sung, tải khoảng 2,46 GB trọng số khi chưa có trong bộ nhớ đệm. Meta phát hành NLLB theo giấy phép **CC BY-NC 4.0** cho mục đích nghiên cứu. [Mitsua ElanMT](https://huggingface.co/Mitsua/elan-mt-bt-ja-en) · [NLLB-200 Distilled 600M](https://huggingface.co/facebook/nllb-200-distilled-600M)
 3. **VinAI Translate v2** dịch sang tiếng Việt từ văn bản tiếng Anh gốc hoặc từ kết quả Nhật → Anh của model đã chọn. [VinAI Translate v2 trên Hugging Face](https://huggingface.co/vinai/vinai-translate-en2vi-v2)
-4. **Qwen3.5 Q4_K_M** chạy cục bộ qua llama.cpp. Cả hai bản chỉ nhận text từ OCR và tắt thinking. App lưu trọng số GGUF riêng trong `model/`, khoảng 1,31 GB cho 2B và 3,03 GB cho 4B. [Bản 2B của SoAIHQ](https://huggingface.co/SoAIHQ/Qwen3.5-2B-GGUF) · [Bản 4B của ggml-org](https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF)
+4. **Qwen Q4_K_M** chạy cục bộ qua llama.cpp. App chỉ gửi text từ OCR và yêu cầu tắt thinking. Các tệp GGUF nằm trong `model/`, khoảng 1,31 GB cho 2B, 3,03 GB cho 4B, 5,68 GB cho 9B và 19,4 GB cho 27B. [2B của SoAIHQ](https://huggingface.co/SoAIHQ/Qwen3.5-2B-GGUF) · [4B của ggml-org](https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF) · [9B của Unsloth](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) · [27B của ggml-org](https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF)
 
 Chữ nhỏ, phông cách điệu hoặc nền phức tạp có thể làm OCR đọc sai và ảnh hưởng đến bản dịch. Văn bản chỉ có chữ Hán có thể được nhận nhầm là tiếng Nhật. Tốc độ phụ thuộc vào phần cứng và vùng quét. Ứng dụng dùng GPU khi PyTorch nhận được CUDA tương thích.
 

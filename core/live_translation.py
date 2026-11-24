@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isfinite
 from threading import Condition, Thread
 from time import perf_counter, sleep
@@ -20,6 +20,7 @@ Region = tuple[int, int, int, int]  # x, y, width, height in screen pixels
 Box = tuple[int, int, int, int]  # left, top, right, bottom, relative to region
 Frame = NDArray[np.uint8]
 _CACHE_SIZE = 1024
+_DIALOGUE_EXTENSION_SECONDS = 3
 _LOG = logging.getLogger(__name__)
 
 
@@ -52,6 +53,8 @@ class _Models(Protocol):
 
     def translate(self, texts: list[str]) -> list[str]: ...
 
+    def translate_contextual(self, text: str, *, role: str, rules: str, speaker: str, history) -> str: ...
+
     def close(self) -> None: ...
 
 
@@ -73,6 +76,7 @@ class LiveUpdate:
     region: Region
     lines: tuple[TranslatedLine, ...]
     error: str | None = None
+    token_count: int | None = None
 
 
 class _MssCapture:
@@ -125,6 +129,42 @@ def _group_dialogue_lines(detected: list[tuple[Box, str]]) -> list[tuple[Box, st
     ]
 
 
+@dataclass(frozen=True)
+class _DialogueTurn:
+    crop_index: int
+    box: Box
+    updated_at: float
+    context: tuple[str, str, str]
+
+    def continues(self, crop_index, box, speaker, text, recent, now):
+        old_speaker, old_text, old_translation = self.context
+        if (
+            crop_index != self.crop_index or speaker != old_speaker
+            or recent.get(old_text) != old_translation
+            or now - self.updated_at > _DIALOGUE_EXTENSION_SECONDS
+        ):
+            return False
+
+        old_text = " ".join(old_text.split())
+        text = " ".join(text.split())
+        suffix = text[len(old_text):]
+        if not suffix or not text.startswith(old_text):
+            return False
+        sentence = old_text.rstrip(" \"'”’」』）)]】〉》")
+        if sentence.endswith((".", "!", "?", "。", "！", "？", "…")) and any(
+            character.isalnum() for character in suffix
+        ):
+            return False
+
+        left, top, right, bottom = box
+        old_left, old_top, old_right, old_bottom = self.box
+        overlap = min(right, old_right) - max(left, old_left)
+        return (
+            overlap >= .5 * min(right - left, old_right - old_left)
+            and abs(top - old_top) <= .5 * min(bottom - top, old_bottom - old_top)
+        )
+
+
 class LiveTranslationSession:
     """A latest-frame pipeline. Only ``poll()`` delivers updates to the UI."""
 
@@ -136,6 +176,8 @@ class LiveTranslationSession:
         capture_factory: Callable[[], AbstractContextManager[_Capture]] | None = None,
         frame_crop: WindowCrop | None = None,
         group_dialogue: bool = False,
+        frame_crops: tuple[tuple[WindowCrop, str, str], ...] = (),
+        history_turns: int = 0,
     ):
         if not isfinite(capture_fps) or capture_fps <= 0:
             raise ValueError('capture_fps must be finite and positive')
@@ -144,6 +186,9 @@ class LiveTranslationSession:
         self._capture_factory = capture_factory if capture_factory is not None else _open_desktop
         self._frame_crop = frame_crop
         self._group_dialogue = group_dialogue
+        self._frame_crops = tuple(frame_crops)
+        self._history_turns = history_turns
+        self._context_revision = 0
         self._state = Condition()
         self._closed = False
         self._generation = 0
@@ -163,6 +208,15 @@ class LiveTranslationSession:
             if not self._closed:
                 self._set_region(region)
 
+    def move(self, region: Region) -> None:
+        with self._state:
+            if self._region is not None:
+                if region[2:] != self._region[2:]:
+                    raise ValueError("Moving live capture requires the same region size")
+                self._region = region
+            if self._update is not None:
+                self._update = replace(self._update, region=region)
+
     def stop(self) -> None:
         with self._state:
             self._set_region(None)
@@ -173,6 +227,10 @@ class LiveTranslationSession:
                 self._generation += 1
                 self._pending_frame = None
                 self._update = LiveUpdate(self._region, ())
+
+    def clear_context(self) -> None:
+        with self._state:
+            self._context_revision += 1
 
     def poll(self) -> LiveUpdate | None:
         with self._state:
@@ -191,15 +249,17 @@ class LiveTranslationSession:
     def _set_region(self, region: Region | None) -> None:
         # All shared state changes here occur under the condition lock.
         self._generation += 1
+        self._context_revision += 1
         self._region = region
         self._last_captured = None
         self._pending_frame = None
         self._update = None
         self._state.notify_all()
 
-    def _fail(self, generation: int, region: Region, operation: str, error: Exception) -> None:
+    def _fail(self, generation: int, operation: str, error: Exception) -> None:
         with self._state:
-            if generation == self._generation:
+            if generation == self._generation and self._region is not None:
+                region = self._region
                 self._set_region(None)
                 self._update = LiveUpdate(region, (), f'{operation}: {str(error) or type(error).__name__}')
 
@@ -215,13 +275,17 @@ class LiveTranslationSession:
                 with self._capture_factory() as capture:
                     self._capture_frames(capture, region)
             except Exception as error:
-                self._fail(generation, region, 'Screen capture failed', error)
+                self._fail(generation, 'Screen capture failed', error)
 
     def _capture_frames(self, capture: _Capture, region: Region) -> None:
-        box = self._frame_crop.box(*region[2:]) if self._frame_crop else None
+        size = region[2:]
+        box = self._frame_crop.box(*size) if self._frame_crop and not (
+            self._frame_crops or self._history_turns
+        ) else None
         while True:
             with self._state:
-                if self._region != region:
+                region = self._region
+                if region is None or region[2:] != size:
                     return
                 generation = self._generation
                 previous = self._last_captured
@@ -234,7 +298,7 @@ class LiveTranslationSession:
                     frame = np.ascontiguousarray(frame[top:bottom, left:right])
                 changed = frame is not None and (previous is None or not np.array_equal(previous, frame))
             except Exception as error:
-                self._fail(generation, region, 'Screen capture failed', error)
+                self._fail(generation, 'Screen capture failed', error)
                 return
 
             with self._state:
@@ -251,8 +315,14 @@ class LiveTranslationSession:
 
     def _analyse(self) -> None:
         cache: OrderedDict[str, str] = OrderedDict()
+        history = deque(maxlen=self._history_turns)
+        region_lines = []
+        previous_tiles = []
+        speakers = []
+        context_revision = 0
         last_frame = None
         last_generation = None
+        last_token_count = None
         while True:
             with self._state:
                 self._state.wait_for(lambda: self._closed or self._pending_frame is not None)
@@ -280,6 +350,48 @@ class LiveTranslationSession:
                         if generation != self._generation:
                             continue
 
+                if self._frame_crops or self._history_turns:
+                    crops = self._frame_crops or ((self._frame_crop, "dialogue", ""),)
+                    if generation != last_generation:
+                        region_lines = [()] * len(crops)
+                        previous_tiles = [None] * len(crops)
+                        speakers = [""] * len(crops)
+                        last_token_count = None
+                    last_frame, last_generation = frame, generation
+                    speaker = ""
+                    for index, (crop, role, rules) in enumerate(crops):
+                        with self._state:
+                            if generation != self._generation:
+                                break
+                            if context_revision != self._context_revision:
+                                history.clear()
+                                context_revision = self._context_revision
+                        height, width = frame.shape[:2]
+                        left, top, right, bottom = crop.box(width, height) if crop else (0, 0, width, height)
+                        tile = frame[top:bottom, left:right]
+                        incoming_speaker = speaker if role == "dialogue" else ""
+                        same_speaker = speakers[index] == incoming_speaker
+                        if not same_speaker or not np.array_equal(previous_tiles[index], tile):
+                            lines, tokens = self._translate_crop(
+                                models, tile, index, role, rules, incoming_speaker, history,
+                                region_lines[index] if same_speaker else (), (left, top), cache,
+                            )
+                            previous_tiles[index] = tile
+                            speakers[index] = incoming_speaker
+                            region_lines[index] = lines
+                            if tokens is not None:
+                                last_token_count = tokens
+                            with self._state:
+                                if generation != self._generation:
+                                    break
+                                self._update = LiveUpdate(
+                                    self._region, tuple(line for rows in region_lines for line in rows),
+                                    token_count=last_token_count,
+                                )
+                        if role == "speaker":
+                            speaker = " ".join(line.translation for line in region_lines[index])
+                    continue
+
                 detected = models.ocr(frame)
                 if self._frame_crop:
                     left, top, _, _ = self._frame_crop.box(*region[2:])
@@ -292,9 +404,11 @@ class LiveTranslationSession:
                         continue
                 if self._group_dialogue:
                     detected = _group_dialogue_lines(detected)
-                lines = self._translate(models, detected, cache, preserve_line_breaks=self._group_dialogue)
+                lines, token_count = self._translate(
+                    models, detected, cache, preserve_line_breaks=self._group_dialogue,
+                )
             except Exception as error:
-                self._fail(generation, region, 'Live inference failed', error)
+                self._fail(generation, 'Live inference failed', error)
                 with self._state:
                     if models is None or self._models is not models:
                         continue
@@ -302,10 +416,71 @@ class LiveTranslationSession:
                 self._close_models(models)
                 continue
 
-            last_frame, last_generation = frame, generation
             with self._state:
                 if generation == self._generation:
-                    self._update = LiveUpdate(region, lines)
+                    if token_count is not None or generation != last_generation:
+                        last_token_count = token_count
+                    last_frame, last_generation = frame, generation
+                    self._update = LiveUpdate(self._region, lines, token_count=last_token_count)
+
+    def _translate_crop(self, models, tile, crop_index, role, rules, speaker, history, previous, offset, cache):
+        detected = models.ocr(np.ascontiguousarray(tile))
+        if self._group_dialogue and role == "dialogue":
+            detected = _group_dialogue_lines(detected)
+        else:
+            detected.sort(key=lambda item: (item[0][1], item[0][0]))
+        left, top = offset
+        detected = [((x1 + left, y1 + top, x2 + left, y2 + top), source)
+                    for (x1, y1, x2, y2), source in detected]
+        if not self._group_dialogue and role == "dialogue":
+            return self._translate(models, detected, cache)
+
+        recent = {self._normalize(line.source, True): line.translation for line in previous}
+        lines = []
+        token_count = None
+        for box, source in detected:
+            text = self._normalize(source, True)
+            if not text:
+                continue
+            translation = recent.get(text)
+            if translation is None:
+                draft_index = None
+                if self._group_dialogue:
+                    if role == "dialogue" and recent:
+                        now = perf_counter()
+                        draft_index = next((
+                            index for index in reversed(range(len(history)))
+                            if history[index].continues(crop_index, box, speaker, text, recent, now)
+                        ), None)
+                    translation = models.translate_contextual(
+                        text, role=role, rules=rules, speaker=speaker,
+                        history=tuple(turn.context for index, turn in enumerate(history) if index != draft_index),
+                    )
+                    count = getattr(models, "last_token_count", None)
+                    if count is not None:
+                        token_count = count
+                else:
+                    translation = text
+                if translation.strip() and role == "dialogue":
+                    turn = _DialogueTurn(crop_index, box, perf_counter(), (speaker, text, translation))
+                    if draft_index is None:
+                        history.append(turn)
+                    else:
+                        history[draft_index] = turn
+            if translation.strip():
+                lines.append(TranslatedLine(box, source, translation))
+        return tuple(lines), token_count
+
+    @staticmethod
+    def _normalize(source, preserve_line_breaks):
+        normalized = normalize("NFC", source)
+        if preserve_line_breaks:
+            text = "\n".join(" ".join(line.split()) for line in normalized.splitlines() if line.strip())
+        else:
+            text = " ".join(normalized.split())
+        return text if any(character.isalpha() for character in text) and sum(
+            character.isalnum() for character in text
+        ) >= 2 else ""
 
     @staticmethod
     def _translate(
@@ -319,14 +494,8 @@ class LiveTranslationSession:
         translations = {}
         missing = {}
         for box, source in detected:
-            normalized = normalize('NFC', source)
-            if preserve_line_breaks:
-                text = '\n'.join(' '.join(line.split()) for line in normalized.splitlines() if line.strip())
-            else:
-                text = ' '.join(normalized.split())
-            if not any(character.isalpha() for character in text):
-                continue
-            if sum(character.isalnum() for character in text) < 2:
+            text = LiveTranslationSession._normalize(source, preserve_line_breaks)
+            if not text:
                 continue
             entries.append((box, source, text))
             if text in cache:
@@ -335,8 +504,10 @@ class LiveTranslationSession:
             else:
                 missing[text] = None
 
+        token_count = None
         if missing:
             results = models.translate(list(missing))
+            token_count = getattr(models, 'last_token_count', None)
             for text, translation in zip(missing, results, strict=True):
                 translations[text] = translation
             for text in missing:
@@ -344,11 +515,12 @@ class LiveTranslationSession:
                 if len(cache) > _CACHE_SIZE:
                     cache.popitem(last=False)
 
-        return tuple(
+        lines = tuple(
             TranslatedLine(box, source, translations[text])
             for box, source, text in entries
             if translations[text].strip()
         )
+        return lines, token_count
 
     @staticmethod
     def _close_models(models: _Models) -> None:

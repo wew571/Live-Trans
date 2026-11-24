@@ -52,6 +52,7 @@ def test_startup_lists_addons_separately_from_required_models(tmp_path, monkeypa
     assert {item.key for item in items if item.optional} == {
         "translate-ja-en-nllb", "live-ocr-medium-det", "live-ocr-medium-rec",
         "live-translate-qwen", "live-translate-qwen-2b", "live-qwen-runtime",
+        "live-translate-qwen-9b", "live-translate-qwen-27b", "live-qwen-cuda-runtime",
     }
     assert {item.key for item in items if not item.optional} == {
         "translate-ja-en", "live-translate-en-vi", "live-ocr-det", "live-ocr-rec",
@@ -62,7 +63,7 @@ def test_direct_inventory_requires_qwen_and_its_runtime_instead_of_pivot_models(
     from core.ocr_settings import PRESETS
     from core.setup_models import available_model_settings, model_items
 
-    settings = PRESETS["XHigh"]
+    settings = PRESETS["Ultra"]
     settings.save(tmp_path)
     direct = {"live-ocr-medium-det", "live-ocr-medium-rec", "live-translate-qwen", "live-qwen-runtime"}
     assert {item.key for item in model_items(tmp_path, settings)} == direct
@@ -75,18 +76,24 @@ def test_direct_inventory_requires_qwen_and_its_runtime_instead_of_pivot_models(
 @pytest.mark.parametrize("variant,key,filename", [
     ("2b", "live-translate-qwen-2b", "Qwen3.5-2B-Q4_K_M.gguf"),
     ("4b", "live-translate-qwen", "Qwen3.5-4B-Q4_K_M.gguf"),
+    ("9b", "live-translate-qwen-9b", "Qwen3.5-9B-Q4_K_M.gguf"),
+    ("27b", "live-translate-qwen-27b", "Qwen3.8-27B-Q4_K_M.gguf"),
 ])
 def test_direct_inventory_selects_only_requested_qwen_variant(tmp_path, variant, key, filename):
     from dataclasses import replace
     from core.ocr_settings import PRESETS
     from core.setup_models import model_items, qwen_model_path
 
-    settings = replace(PRESETS["XHigh"], qwen_model=variant)
+    settings = replace(PRESETS["Ultra"], qwen_model=variant)
     selected = model_items(tmp_path, settings)
     assert {item.key for item in selected if item.key.startswith("live-translate-qwen")} == {key}
+    assert not {"translate-ja-en", "live-translate-en-vi"} & {item.key for item in selected}
     all_items = model_items(tmp_path, settings, include_optional=True)
     qwen = {item.key: item for item in all_items if item.key.startswith("live-translate-qwen")}
-    assert set(qwen) == {"live-translate-qwen", "live-translate-qwen-2b"}
+    assert set(qwen) == {
+        "live-translate-qwen", "live-translate-qwen-2b",
+        "live-translate-qwen-9b", "live-translate-qwen-27b",
+    }
     assert not qwen[key].optional
     assert all(item.optional for other, item in qwen.items() if other != key)
     assert qwen_model_path(tmp_path, variant) == tmp_path / "model" / filename
@@ -115,6 +122,64 @@ def test_qwen_runtime_installs_from_verified_zip_and_detects_missing_dll(tmp_pat
     assert not (setup_models.qwen_server_path(tmp_path).parent.parent / "outside.exe").exists()
     setup_models.qwen_server_path(tmp_path).with_name("ggml-vulkan.dll").unlink()
     assert not runtime.is_ready()
+
+
+def test_cuda_backend_requires_only_its_runtime_and_remains_optional_for_vulkan(tmp_path):
+    from dataclasses import replace
+
+    from core.ocr_settings import PRESETS
+    from core.setup_models import model_items
+
+    default = PRESETS["Ultra"]
+    selected = replace(default, qwen_backend="cuda-python")
+    default_items = {item.key: item for item in model_items(tmp_path, default, include_optional=True)}
+    assert default_items["live-qwen-cuda-runtime"].optional
+    assert not default_items["live-qwen-runtime"].optional
+    direct = {item.key for item in model_items(tmp_path, selected)}
+    assert "live-qwen-cuda-runtime" in direct
+    assert "live-qwen-runtime" not in direct
+    all_items = {item.key: item for item in model_items(tmp_path, selected, include_optional=True)}
+    assert all_items["live-qwen-runtime"].optional
+    assert not all_items["live-qwen-cuda-runtime"].optional
+
+
+def test_cuda_runtime_installs_avx2_dlls_in_private_package(tmp_path, monkeypatch):
+    from zipfile import ZipFile
+
+    from core import setup_libraries, setup_models
+
+    directory = setup_models.qwen_cuda_runtime_path(tmp_path)
+    wheel = directory.parent / setup_models._QWEN_CUDA_WHEEL
+    archive = directory.parent / setup_models._QWEN_CUDA_CPU_ZIP
+    _asset(wheel, b"local wheel fixture")
+    expected = {name: name.encode() for name in setup_models._QWEN_CUDA_CPU_FILES}
+    with ZipFile(archive, "w") as bundle:
+        for name, data in expected.items():
+            bundle.writestr(name, data)
+        bundle.writestr("../outside.dll", b"ignored")
+    for key, asset in (("_QWEN_CUDA_WHEEL_ASSET", wheel), ("_QWEN_CUDA_CPU_ASSET", archive)):
+        data = asset.read_bytes()
+        monkeypatch.setattr(setup_models, key, setup_models._RemoteFile(len(data), sha256(data).hexdigest()))
+
+    def fake_pip(executable, args, root, progress, label, log):
+        package = Path(args[args.index("--target") + 1])
+        assert not package.is_relative_to(directory) and "--no-deps" in args and str(wheel) in args
+        for name in setup_models._QWEN_CUDA_REQUIRED:
+            if Path(name).name not in {"libomp.dll", "LICENSE-LLVM-OpenMP"}:
+                _asset(package.parent / name, b"original from wheel")
+
+    monkeypatch.setattr(setup_libraries, "_pip", fake_pip)
+    items = {item.key: item for item in setup_models.model_items(tmp_path, include_optional=True)}
+    item = items["live-qwen-cuda-runtime"]
+    assert not item.is_ready()
+    item.install(lambda _completed, _total: None)
+    assert item.is_ready()
+    native = directory / "python" / "llama_cpp" / "lib"
+    assert (native / "ggml-cpu.dll").read_bytes() == expected["ggml-cpu-haswell.dll"]
+    assert (native / "libomp.dll").read_bytes() == expected["libomp.dll"]
+    assert not list(tmp_path.rglob("outside.dll"))
+    (native / "ggml-cuda.dll").unlink()
+    assert not item.is_ready()
 
 
 def test_missing_saved_addons_fall_back_without_overwriting_saved_selection(tmp_path, monkeypatch):

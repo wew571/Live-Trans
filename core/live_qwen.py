@@ -12,7 +12,10 @@ import socket
 import subprocess
 from tempfile import TemporaryFile
 from time import monotonic, sleep
+from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
+
+from core.qwen_rules import parse_crop_rule
 
 
 _SOURCE_SCRIPT = re.compile(r"[A-Za-z\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]")
@@ -20,6 +23,10 @@ _SYSTEM_PROMPT = """Dịch lời thoại tiếng Nhật hoặc tiếng Anh sang 
 Đầu vào là tên người nói và các dòng OCR thuộc một lượt thoại. Đọc các dòng như một đoạn liên tục.
 Chỉ trả về bản dịch của lời thoại, bỏ nhãn tên người nói. Giữ sắc thái, ngập ngừng và dấu ngoặc độc thoại nếu có.
 Không tự thêm chủ ngữ, sự kiện hay lời giải thích khi bản gốc mơ hồ."""
+
+
+class QwenContextLimitError(RuntimeError):
+    """The prompt and reserved output exceed the configured context."""
 
 
 def _kill_with_worker(process):
@@ -48,12 +55,13 @@ def _kill_with_worker(process):
 class QwenTranslator:
     """Keep one Qwen model loaded for a live session."""
 
-    def __init__(self, model_path: Path, server_path: Path, context_size: int, *, rules: str = ""):
+    def __init__(self, model_path: Path, server_path: Path | None, context_size: int, *, rules: str = ""):
         self._model_path = model_path.resolve()
-        self._server_path = server_path.resolve()
+        self._server_path = server_path.resolve() if server_path is not None else None
         self._context_size = context_size
         if not isinstance(rules, str):
             raise ValueError("Qwen rules must be text.")
+        _, rules = parse_crop_rule(rules)
         self._system_prompt = _SYSTEM_PROMPT
         if rules.strip():
             self._system_prompt += (
@@ -66,8 +74,10 @@ class QwenTranslator:
         self._process = None
         self._job = None
         self._log = None
+        self.last_token_count: int | None = None
 
     def __call__(self, texts: list[str]) -> list[str]:
+        self.last_token_count = None
         translations = [""] * len(texts)
         inputs = [(index, text.strip()) for index, text in enumerate(texts) if _SOURCE_SCRIPT.search(text)]
         if inputs:
@@ -76,18 +86,56 @@ class QwenTranslator:
             translations[index] = self._translate(text)
         return translations
 
-    def _translate(self, text: str) -> str:
+    def translate_contextual(self, text: str, *, role: str, rules: str, speaker: str, history) -> str:
+        self.last_token_count = None
+        if not _SOURCE_SCRIPT.search(text):
+            return ""
+        self._start()
+        system = (
+            self._system_prompt
+            + "\nKhi vùng hiện tại là nhãn người nói, chỉ chuẩn hóa tên riêng, giữ nguyên tên Latin "
+              "chính thức nếu biết. Các lượt trước chỉ cung cấp ngữ cảnh. "
+              "Quy tắc của vùng hiện tại được ưu tiên nếu khác quy tắc dịch chung."
+        )
+        current = (
+            f"Vùng tên người nói. Chỉ trả về tên.\nTên OCR:\n{text}"
+            if role == "speaker"
+            else f"Người nói: {speaker or '(không rõ)'}\nLời thoại OCR:\n{text}"
+        )
+        if rules.strip():
+            current = f"Quy tắc của vùng hiện tại:\n{rules.strip()}\n\n{current}"
+        prefix = [{"role": "system", "content": system}]
+        for old_speaker, source, translation in history:
+            prefix.extend((
+                {"role": "user", "content": f"Người nói: {old_speaker or '(không rõ)'}\nLời thoại OCR:\n{source}"},
+                {"role": "assistant", "content": translation},
+            ))
+        while True:
+            try:
+                return self._translate(text, [*prefix, {"role": "user", "content": current}])
+            except QwenContextLimitError:
+                if len(prefix) <= 1:
+                    raise
+                del prefix[1:3]
+            except RuntimeError as error:
+                cause = error.__cause__
+                if len(prefix) <= 1 or not isinstance(cause, HTTPError) or cause.code not in (400, 413):
+                    raise
+                with cause:
+                    detail = cause.read(8192).lower()
+                if b"context" not in detail:
+                    raise
+                del prefix[1:3]
+
+    def _translate(self, text: str, messages=None) -> str:
         try:
-            response = self._request("/v1/chat/completions", {
-                "messages": [
+            response = self._complete(
+                messages if messages is not None else [
                     {"role": "system", "content": self._system_prompt},
                     {"role": "user", "content": f"Người nói: (không rõ)\nLời thoại OCR:\n{text}"},
                 ],
-                "chat_template_kwargs": {"enable_thinking": False},
-                "temperature": 0,
-                "max_tokens": min(512, max(132, len(text) * 2)),
-                "stream": False,
-            })
+                min(512, max(132, len(text) * 2)),
+            )
             choice = response["choices"][0]
             message = choice["message"]
             content = message["content"]
@@ -95,12 +143,26 @@ class QwenTranslator:
                 raise ValueError("Invalid content")
         except (OSError, ValueError, TypeError, KeyError, IndexError) as error:
             raise RuntimeError("Qwen did not return a valid translation.") from error
-        if message.get("reasoning_content") or re.search(r"</?think\s*>", content, re.IGNORECASE):
+        if message.get("reasoning_content") or re.search(
+            r"</?think\s*>|^\s*Thinking Process\s*:", content, re.IGNORECASE,
+        ):
             raise RuntimeError("Qwen returned thinking content with thinking disabled.")
+        usage = response.get("usage")
+        count = usage.get("total_tokens") if isinstance(usage, dict) else None
+        self.last_token_count = count if type(count) is int and count >= 0 else None
         content = content.strip()
         if content and choice.get("finish_reason") == "length":
             return content.rstrip(".…") + "…"
         return content
+
+    def _complete(self, messages, max_tokens):
+        return self._request("/v1/chat/completions", {
+            "messages": messages,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "stream": False,
+        })
 
     def _request(self, endpoint, payload=None, *, timeout=90):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
@@ -117,7 +179,7 @@ class QwenTranslator:
         if self._process is not None and self._process.poll() is None:
             return
         self.close()
-        if not self._server_path.is_file() or not self._model_path.is_file():
+        if self._server_path is None or not self._server_path.is_file() or not self._model_path.is_file():
             raise RuntimeError("Qwen model or llama.cpp is missing. Install them in Setup.")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))

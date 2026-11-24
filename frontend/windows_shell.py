@@ -44,3 +44,55 @@ def set_taskbar_window(window):
             store.SetValue(property_key, propsys.PROPVARIANTType(value))
     except pywintypes.com_error:
         _LOG.warning("Could not set the Windows taskbar icon", exc_info=True)
+
+
+def place_window_beside(window, anchor_hwnd):
+    """Lay out two Windows dialogs in the work area of the anchor's monitor."""
+    import win32api
+    import win32con
+    import win32gui
+
+    hwnd = win32gui.GetAncestor(window.winfo_id(), win32con.GA_ROOT)
+    left, top, right, _ = win32gui.GetWindowRect(anchor_hwnd)
+    dialog_left, dialog_top, dialog_right, dialog_bottom = win32gui.GetWindowRect(hwnd)
+    monitor = win32api.MonitorFromWindow(anchor_hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+    work_left, work_top, work_right, work_bottom = win32api.GetMonitorInfo(monitor)["Work"]
+    width, height = dialog_right - dialog_left, dialog_bottom - dialog_top
+    anchor_width = right - left
+    flags = win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE
+    anchor_x = left
+
+    if right + width <= work_right:
+        x = right
+    elif left - width >= work_left:
+        x = left - width
+    else:
+        x = max(work_left, work_right - width)
+        if anchor_width + width <= work_right - work_left:
+            anchor_x = x - anchor_width
+
+    x = max(work_left, min(x, work_right - width))
+    y = max(work_top, min(top, work_bottom - height))
+    win32gui.SetWindowPos(anchor_hwnd, win32con.HWND_TOP, anchor_x, top, 0, 0, flags)
+    win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, x, y, 0, 0, flags)
+
+
+def raise_settings_window(hwnd):
+    import win32con
+    import win32gui
+
+    flags = win32con.SWP_NOSIZE | win32con.SWP_NOMOVE | win32con.SWP_NOACTIVATE
+    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+
+
+def set_dark_title_bar(window):
+    """Set the Windows caption theme without hiding or reactivating the dialog."""
+    from ctypes import wintypes
+    import win32con
+    import win32gui
+
+    hwnd = wintypes.HWND(win32gui.GetAncestor(window.winfo_id(), win32con.GA_ROOT))
+    dark = wintypes.BOOL(1)
+    apply = ctypes.windll.dwmapi.DwmSetWindowAttribute
+    if apply(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark)) != 0:
+        apply(hwnd, 19, ctypes.byref(dark), ctypes.sizeof(dark))

@@ -5,6 +5,7 @@ from collections import Counter, OrderedDict
 from contextlib import contextmanager
 
 import numpy as np
+import pytest
 
 from core import live_translation
 from core.live_translation import LiveTranslationSession
@@ -13,6 +14,74 @@ from core.live_translation import LiveTranslationSession
 REGION = (-100, 20, 4, 3)
 OTHER_REGION = (50, 60, 4, 3)
 BOX = (1, 0, 4, 3)
+
+
+def test_ordered_crops_keep_speaker_and_recent_dialogue():
+    from contextlib import nullcontext
+
+    from core.live_translation import WindowCrop
+
+    class Capture:
+        dialogue = 2
+
+        def grab(self, region):
+            frame = np.ones((4, 8, 3), dtype=np.uint8)
+            frame[:, 4:] = self.dialogue
+            return frame
+
+    class ContextualModels:
+        def __init__(self):
+            self.calls = []
+
+        def ocr(self, frame):
+            text = {1: "カレン", 2: "First line", 3: "Next line", 4: "New scene"}[int(frame[0, 0, 0])]
+            return [((0, 0, 4, 4), text)]
+
+        def translate_contextual(self, text, **context):
+            self.calls.append((text, context))
+            return "Curren" if context["role"] == "speaker" else "VI " + text
+
+        def close(self):
+            pass
+
+    capture, models = Capture(), ContextualModels()
+    region = (50, 60, 8, 4)
+    session = LiveTranslationSession(
+        lambda: models, capture_factory=lambda: nullcontext(capture),
+        frame_crops=(
+            (WindowCrop(0, 0, .5, 1), "speaker", "Names"),
+            (WindowCrop(.5, 0, 1, 1), "dialogue", "Dialogue"),
+        ),
+        group_dialogue=True, history_turns=2,
+    )
+
+    def wait_translation(translation):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update and any(line.translation == translation for line in update.lines):
+                return update.lines
+            time.sleep(.01)
+        raise AssertionError(f"Missing translation: {translation}")
+
+    try:
+        session.start(region)
+        result = wait_translation("VI First line")
+        assert [line.box for line in result] == [(0, 0, 4, 4), (4, 0, 8, 4)]
+        capture.dialogue = 3
+        wait_translation("VI Next line")
+        assert [source for source, _ in models.calls] == ["カレン", "First line", "Next line"]
+        assert models.calls[-1][1] == {
+            "role": "dialogue", "rules": "Dialogue", "speaker": "Curren",
+            "history": (("Curren", "First line", "VI First line"),),
+        }
+        session.clear_context()
+        capture.dialogue = 4
+        wait_translation("VI New scene")
+        assert models.calls[-1][1]["history"] == ()
+        assert models.calls[-1][1]["speaker"] == "Curren"
+    finally:
+        session.close()
 
 
 class Screen:
@@ -164,6 +233,17 @@ class LiveTranslationTests(unittest.TestCase):
         self.assertEqual(self.models.ocr_values, [1, 3])
         self.assertIsNone(self.session.poll())
 
+    def test_token_count_survives_cached_updates_only_within_the_same_run(self):
+        self.models.last_token_count = 2255
+        self.session.start(REGION)
+        self.assertEqual(self.wait_for_update().token_count, 2255)
+        self.screen.show(2)
+        self.assertEqual(self.wait_for_update().token_count, 2255)
+        self.session.stop()
+        self.session.start(OTHER_REGION)
+        self.assertIsNone(self.wait_for_update().token_count)
+        self.assertEqual(self.models.batches, [['First line']])
+
     def test_region_change_discards_completion_from_previous_region(self):
         self.models.resume.clear()
         self.session.start(REGION)
@@ -269,7 +349,7 @@ class LiveTranslationTests(unittest.TestCase):
             ' U. ', '「の」', 'はい', '人\nの心',
         )
         detected = [(BOX, source) for source in sources]
-        lines = self.session._translate(self.models, detected, OrderedDict(), preserve_line_breaks=True)
+        lines, _ = self.session._translate(self.models, detected, OrderedDict(), preserve_line_breaks=True)
 
         expected = ['MA', 'L6', '8V', 'はい', '人\nの心']
         self.assertEqual(self.models.batches, [expected])
@@ -278,3 +358,126 @@ class LiveTranslationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+class DialogueFeed(Screen):
+    def __init__(self):
+        super().__init__()
+        self.sources = {1: "How was your day?"}
+        self.calls = []
+
+    def ocr(self, frame):
+        text = self.sources[int(frame[0, 0, 0])]
+        return [(BOX, text)] if text else []
+
+    def translate_contextual(self, text, *, role, rules, speaker, history):
+        self.calls.append((text, tuple(source for _, source, _ in history)))
+        return "VI " + text
+
+    def close(self):
+        pass
+
+    def wait_for_update(self, session, text, region=REGION):
+        deadline = time.monotonic() + 3
+        expected = (text,) if text else ()
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update is not None:
+                assert update.error is None
+                if update.region == region and tuple(line.source for line in update.lines) == expected:
+                    return
+            time.sleep(.005)
+        raise AssertionError(f"Missing update for {text!r} at {region}")
+
+    def show_text(self, session, text, region=REGION):
+        value = len(self.sources) + 1
+        self.sources[value] = text
+        self.show(value)
+        self.wait_for_update(session, text, region)
+
+
+def test_moving_window_keeps_history_and_does_not_translate_the_same_frame():
+    feed = DialogueFeed()
+    session = LiveTranslationSession(lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=2)
+    try:
+        session.start(REGION)
+        feed.wait_for_update(session, "How was your day?")
+        feed.show_text(session, "Second line")
+        session.move(OTHER_REGION)
+        feed.show_text(session, "Third line", OTHER_REGION)
+
+        assert feed.calls[-1] == ("Third line", ("How was your day?", "Second line"))
+        assert [text for text, _ in feed.calls].count("Second line") == 1
+    finally:
+        session.close()
+
+
+def test_growing_dialogue_replaces_the_draft_in_history():
+    feed = DialogueFeed()
+    session = LiveTranslationSession(lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=2)
+    try:
+        session.start(REGION)
+        feed.wait_for_update(session, "How was your day?")
+        for text in ("Hello", "Hello there", "Hello there!", "What next?"):
+            feed.show_text(session, text)
+
+        assert feed.calls[-2] == ("Hello there!", ("How was your day?",))
+        assert feed.calls[-1] == ("What next?", ("How was your day?", "Hello there!"))
+    finally:
+        session.close()
+
+
+def test_dialogue_with_shared_prefix_after_empty_frame_is_a_new_turn():
+    feed = DialogueFeed()
+    session = LiveTranslationSession(lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=2)
+    try:
+        session.start(REGION)
+        feed.wait_for_update(session, "How was your day?")
+        for text in ("Wait", "", "Wait for me!", "What next?"):
+            feed.show_text(session, text)
+
+        assert feed.calls[-1] == ("What next?", ("Wait", "Wait for me!"))
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(("complete", "next_line"), [
+    ("Wait.", "Wait. Let me explain."),
+    ("「待って。」", "「待って。」説明させて。"),
+])
+def test_dialogue_with_shared_prefix_after_sentence_end_is_a_new_turn(complete, next_line):
+    feed = DialogueFeed()
+    session = LiveTranslationSession(lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=2)
+    try:
+        session.start(REGION)
+        feed.wait_for_update(session, "How was your day?")
+        for text in (complete, next_line, "What next?"):
+            feed.show_text(session, text)
+
+        assert feed.calls[-1] == ("What next?", (complete, next_line))
+    finally:
+        session.close()
+
+
+def test_move_publishes_in_flight_translation_at_new_position():
+    translating, finish = threading.Event(), threading.Event()
+
+    class BlockingFeed(DialogueFeed):
+        def translate_contextual(self, text, **context):
+            translating.set()
+            assert finish.wait(3)
+            return super().translate_contextual(text, **context)
+
+    feed = BlockingFeed()
+    session = LiveTranslationSession(lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=2)
+    try:
+        session.start(REGION)
+        assert translating.wait(3)
+        session.move(OTHER_REGION)
+        finish.set()
+        feed.wait_for_update(session, "How was your day?", OTHER_REGION)
+        assert feed.calls == [("How was your day?", ())]
+    finally:
+        finish.set()
+        session.close()

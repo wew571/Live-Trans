@@ -1,0 +1,920 @@
+<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cài đặt Live Trans · Bản mẫu</title><style>
+  .xm-stage { overflow-x: auto; background: #11111b; }
+  .xm-win { --acc: 143, 160, 255; width: 434px; margin: 0 auto; padding: 16px 20px; background: #181825; border: 1px solid #37374d; border-radius: 12px; color: #e9ecfa; font: 14px/1.4 'Segoe UI', system-ui, sans-serif; user-select: none; }
+  .xm-title { font-weight: 700; font-size: 18px; margin-bottom: 12px; }
+  .xm-box { position: relative; background: #242438; border: 1px solid #3a3a52; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
+  .xm-box-glow { position: absolute; inset: -1px; border-radius: 8px; pointer-events: none; opacity: 0; }
+  .xm-box-glow i, .xm-glow i { position: absolute; inset: 0; border-radius: inherit; opacity: .75; }
+  .xm-box-glow i { box-shadow: 0 0 0 1px rgba(var(--acc), .9), 0 0 16px 2px rgba(var(--acc), .5); }
+  .xm-name { font-weight: 700; font-size: 15px; }
+  .xm-line { color: #bac2de; font-size: 13px; }
+  .xm-tok { border-radius: 3px; cursor: pointer; }
+  .xm-tok:hover { box-shadow: 0 0 0 1px #5a5f88; }
+  .xm-win[data-tier="u"] .xm-tok.on-u, .xm-win[data-tier="x"] .xm-tok.on-x {
+    background-size: 120px 100%; background-position: var(--tok-pos, 0) 0;
+    -webkit-background-clip: text; background-clip: text;
+    color: rgba(186, 194, 222, var(--tok-hide, 1));
+  }
+  .xm-win[data-tier="u"] .xm-tok.on-u { background-image: linear-gradient(90deg, #8fb0e8 0%, #c3b5ff 22%, #eef3ff 42%, #9f8fff 64%, #7fa3db 84%, #8fb0e8 100%); }
+  .xm-win[data-tier="x"] .xm-tok.on-x { background-image: linear-gradient(90deg, #5fd17a 0%, #b4ff8a 22%, #f0fff0 42%, #7eea7e 64%, #3fbf68 84%, #5fd17a 100%); }
+  .xm-win[data-tier="u"] .xm-name .xm-tok.on-u, .xm-win[data-tier="x"] .xm-name .xm-tok.on-x { color: rgba(233, 236, 250, var(--tok-hide, 1)); }
+  .xm-crys {
+    display: inline-block; width: calc(9px * var(--crys, 0)); height: 12px; margin-left: calc(3px * var(--crys, 0));
+    vertical-align: -1px; overflow: visible; pointer-events: none;
+    transform: scale(var(--crys, 0)); transform-origin: 50% 100%;
+    filter: drop-shadow(0 0 1.5px rgba(150, 255, 90, var(--crys-glow, .5))) brightness(calc(.92 + .3 * var(--crys-glow, .5)));
+  }
+  .xm-name .xm-crys { width: calc(11px * var(--crys, 0)); height: 14px; }
+  .xm-panel { background: #242438; border-radius: 8px; padding: 8px 10px 6px; }
+  .xm-slider { --heat: 143, 160, 255; position: relative; width: 374px; height: 48px; overflow: hidden; cursor: ew-resize; outline: none; touch-action: none; }
+  .xm-slider:focus-visible { box-shadow: inset 0 0 0 1px #a6c8ff; }
+  .xm-track { position: absolute; left: 1px; right: 1px; top: 12px; height: 24px; border-radius: 12px; background: #40404d; overflow: hidden; }
+  .xm-fill { position: relative; height: 100%; width: 0; overflow: hidden; background: #3b82f6; }
+  .xm-fx { position: absolute; left: 0; top: 0; width: 372px; height: 24px; }
+  .xm-ahead { position: absolute; top: 12px; left: 0; width: 64px; height: 24px; border-radius: 12px; background: radial-gradient(closest-side, rgba(var(--heat), .9), rgba(var(--heat), .35) 55%, rgba(var(--heat), 0)); opacity: 0; pointer-events: none; }
+  .xm-outline { position: absolute; left: 1px; right: 1px; top: 12px; height: 24px; border-radius: 12px; border: 1px solid rgb(var(--heat)); opacity: 0; pointer-events: none; }
+  .xm-dot { position: absolute; top: 22px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: #858596; }
+  .xm-contact { position: absolute; top: 24px; left: 0; width: 52px; height: 26px; margin: -13px 0 0 -26px; border-radius: 50%; background: radial-gradient(closest-side, rgba(var(--heat), 1), rgba(var(--heat), .45) 55%, rgba(var(--heat), 0)); opacity: 0; pointer-events: none; }
+  .xm-wave { --wave: 143, 160, 255; position: absolute; top: 24px; left: 0; width: 26px; height: 26px; transform: translate(-50%, -50%); border: 2px solid rgb(var(--wave)); border-radius: 50%; box-shadow: 0 0 8px rgba(var(--wave), .8); opacity: 0; pointer-events: none; }
+  .xm-knob { position: absolute; top: 24px; left: 0; width: 26px; height: 26px; margin: -13px 0 0 -13px; pointer-events: none; }
+  .xm-glow { position: absolute; inset: 0; border-radius: 50%; opacity: 0; }
+  .xm-glow i { box-shadow: 0 0 10px 3px rgba(var(--acc), .9); }
+  .xm-thumb { position: absolute; inset: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px #11111b55; }
+  .xm-core { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: radial-gradient(circle, #fbffe8 0%, #b6ff6a 30%, rgba(90, 225, 100, .55) 55%, rgba(90, 225, 100, 0) 72%); opacity: 0; }
+  .xm-labels { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 2px; margin-top: 2px; }
+  .xm-labels button { height: 28px; border: 0; border-radius: 6px; background: transparent; color: #cdd6f4; font: 13px 'Segoe UI', system-ui, sans-serif; cursor: pointer; }
+  .xm-labels button:hover { background: #313244; }
+  .xm-status { margin-top: 10px; min-height: 18px; font: 12px/1.5 Consolas, ui-monospace, monospace; color: #8b90a8; }
+  .xm-notes { font-size: .9rem; color: var(--text-secondary); }
+  .xm-notes ul { margin: .4rem 0 0 1.2rem; }
+  .xm-notes li { margin-bottom: .35rem; }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="xm-cg-l" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6ffb0"/><stop offset=".55" stop-color="#b9ff4f"/><stop offset="1" stop-color="#3fae2a"/>
+    </linearGradient>
+    <linearGradient id="xm-cg-r" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d4ff6a"/><stop offset=".6" stop-color="#7fdc2e"/><stop offset="1" stop-color="#1f7a1f"/>
+    </linearGradient>
+    <symbol id="xm-crystal" viewBox="0 0 12 14">
+      <g transform="rotate(-28 3.2 12.6)">
+        <polygon points="3.2,5.4 4.5,6.8 4.5,12.6 1.9,12.6 1.9,6.8" fill="url(#xm-cg-r)"/>
+        <polygon points="3.2,5.4 1.9,6.8 1.9,12.6 3.2,12.6" fill="url(#xm-cg-l)"/>
+      </g>
+      <g transform="rotate(30 8.8 12.6)">
+        <polygon points="8.8,6.2 10,7.4 10,12.6 7.6,12.6 7.6,7.4" fill="url(#xm-cg-r)"/>
+        <polygon points="8.8,6.2 7.6,7.4 7.6,12.6 8.8,12.6" fill="url(#xm-cg-l)"/>
+      </g>
+      <polygon points="6,0.4 7.7,2.8 7.7,12.2 6,13.6 4.3,12.2 4.3,2.8" fill="url(#xm-cg-r)"/>
+      <polygon points="6,0.4 4.3,2.8 4.3,12.2 6,13.6" fill="url(#xm-cg-l)"/>
+      <path d="M5.1 3.4 L5.1 10.5" stroke="#fbffe6" stroke-width=".55" stroke-linecap="round" opacity=".85"/>
+      <path d="M6 0.4 L6 13.6" stroke="#eaffc0" stroke-width=".3" opacity=".6"/>
+    </symbol>
+  </defs>
+</svg>
+
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101019;color:#ececf8;font:14px 'Segoe UI',sans-serif;min-height:100vh;display:grid;place-items:center}
+main{width:min(474px,100%);padding:16px}.xm-win{width:100%;padding:16px 20px}.xm-slider{max-width:100%}.xm-stage{background:transparent}
+.xm-box{isolation:isolate}.xm-sky,.xm-bolts{position:absolute;inset:0;width:100%;height:100%;border-radius:inherit;pointer-events:none;z-index:-1}
+.xm-sky{background:linear-gradient(90deg,#211326e8,#291023ab 67%,#4c1c2d61),var(--sky) center/cover;opacity:0}
+.xm-win[data-tier="max"] .xm-tok{background:linear-gradient(90deg,#ffd19b,#fff6c9,#ffac5e,#ffe1a2,#ffd19b) var(--tok-pos) center/120px 100%;background-clip:text;color:transparent}
+.xm-win[data-tier="max"] .xm-crys{display:none}
+.xm-win[data-tier="max"] .xm-core{width:14px;height:18px;margin:-9px -7px;background:#fff2aa;clip-path:polygon(58% 0,16% 57%,45% 57%,34% 100%,88% 39%,57% 39%);filter:drop-shadow(0 0 2px #ff9600)}
+.xm-win[data-tier="max"] .xm-thumb{background:radial-gradient(circle,#fff0a8,#ffac35 45%,#ac361c 82%);border:1px solid #ffe4ab}
+footer{display:flex;align-items:center;justify-content:space-between;color:#b9b8cb;margin:14px 2px;font-size:13px}footer button{background:#272738;color:inherit;border:1px solid #454456;border-radius:6px;padding:6px 12px;cursor:pointer}
+
+/* Standalone settings prototype, using the supplied slider and effects. */
+:root { color-scheme: dark; }
+body { background: #101019; align-items: start; }
+main { width: min(468px, 100%); margin: 18px auto; padding: 12px; }
+.xm-stage { overflow: visible; }
+.xm-win { overflow: hidden; --ink: #e9ecfa; --control: #216699; --edge: #477897; }
+.xm-win[data-tier="u"] { --ink: #d9ddff; --control: #31376a; --edge: #6269ab; }
+.xm-win[data-tier="x"] { --ink: #c5f9ca; --control: #24523e; --edge: #448960; }
+.xm-win[data-tier="max"] { --ink: #ffdcaa; --control: #653822; --edge: #a65f36; }
+.xm-title { margin: 0 0 14px; }
+.xm-panel { padding: 0 0 7px; }
+.xm-slider { width: 100%; height: 42px; }
+.xm-fx { width: var(--fx-width, 372px); }
+.xm-labels { margin: 0 -6px; gap: 0; }
+.xm-labels button { padding: 0; font-size: clamp(10px, 3vw, 13px); }
+.xm-specs { border-top: 1px solid rgba(var(--acc), .20); padding-top: 7px; }
+.xm-name { margin-bottom: 1px; }
+.xm-tok { cursor: default; }
+.xm-tok:hover { box-shadow: none; }
+.tier-text { color: var(--ink); transition: color 160ms ease; }
+.xm-win:is([data-tier="u"],[data-tier="x"],[data-tier="max"]) {
+  --shine: linear-gradient(95deg, #bdc9ff, #f3efff 36%, #cdbfff 67%, #bdc9ff);
+}
+.xm-win[data-tier="x"] { --shine: linear-gradient(95deg, #87e9a3, #f1fff1 36%, #c5ff9a 67%, #87e9a3); }
+.xm-win[data-tier="max"] { --shine: linear-gradient(95deg, #ffbd83, #fff6d1 36%, #ffd587 67%, #ffbd83); }
+.xm-win[data-tier] .tier-text {
+  background: var(--shine) 0 50% / 190% 100%;
+  background-clip: text;
+}
+.xm-win:is([data-tier="u"],[data-tier="x"],[data-tier="max"]) .tier-text {
+  color: transparent;
+  animation: text-sheen 5s ease-in-out infinite;
+}
+.xm-win[data-tier="x"] .tier-text { animation-duration: 4s; }
+.xm-win[data-tier="max"] .tier-text { animation-duration: 3s; }
+@keyframes text-sheen { 50% { background-position: 100% 50%; } }
+.advanced { margin-top: 10px; }
+.advanced summary { background: #303043; border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 13px; }
+.settings-form { display: grid; gap: 9px; margin-top: 10px; }
+.field { display: grid; gap: 5px; font-size: 13px; }
+.field select, .field input, .field textarea, .settings-action {
+  width: 100%; min-width: 0; min-height: 28px; border-radius: 6px; color: #f2f3fa; font: inherit;
+}
+.field select, .settings-action { border: 1px solid var(--edge); background: var(--control); }
+.field select { padding: 3px 8px; }
+.field select:disabled { opacity: .8; }
+.field input, .field textarea { padding: 4px 8px; border: 1px solid var(--edge); background: #20202e; }
+.field textarea { resize: vertical; min-height: 144px; }
+.field select option { background: #212135; color: #f2f3fa; }
+.settings-action { padding: 4px 8px; cursor: pointer; font-size: 13px; }
+.settings-action:hover, .settings-action:focus-visible { filter: brightness(1.16); }
+.settings-subset { display: grid; gap: 9px; }
+.settings-subset[hidden] { display: none; }
+.rule-current, .settings-note { margin: 0; color: #bdc2d8; font-size: 13px; }
+.settings-footer { display: grid; gap: 7px; margin-top: 11px; }
+.animation-row { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:28px; padding:0 2px; cursor:pointer; }
+.animation-row[hidden] { display:none; }
+.interface-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 2px; margin-bottom:6px; }
+.interface-row[hidden] { display:none; }
+.interface-row select { flex:0 0 136px; padding:4px 8px; border:1px solid var(--edge); border-radius:6px; background:var(--control); color:#f2f3fa; font:inherit; }
+.animation-row input { appearance:none; display:grid; align-items:center; width:32px; height:18px; margin:0; padding:2px; border:1px solid #626477; border-radius:10px; background:#3a3a4b; cursor:pointer; }
+.animation-row input::before { content:""; width:12px; height:12px; border-radius:50%; background:white; }
+.animation-row input:checked { background:#216699; border-color:#6496bd; justify-items:end; }
+.animation-row input:focus-visible { outline:2px solid #a6c8ff; outline-offset:2px; }
+.xm-win[data-animation="off"] .xm-box { border-color:transparent !important; }
+.xm-win[data-animation="off"] .xm-slider { height:36px; }
+.xm-win[data-animation="off"] :is(.xm-track, .xm-dot) { margin-top:-6px; }
+.xm-win[data-animation="off"] .xm-knob { top:18px; }
+.xm-win[data-animation="off"] .xm-specs { border:0; }
+.xm-win[data-animation="off"] :is(.xm-sky, .xm-bolts, .xm-fx, .xm-ahead, .xm-outline, .xm-contact, .xm-wave, .xm-glow, .xm-core, .xm-box-glow, .xm-crys, .xm-name:not(.is-custom)) { display:none; }
+.xm-win[data-animation="off"] .tier-text { transition:none; }
+@media (max-width: 420px) {
+  main { margin: 0 auto; padding: 8px; }
+  .xm-win { padding: 13px; }
+  .xm-box { padding-inline: 9px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .xm-win[data-tier] .tier-text { animation: none; }
+}
+body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 auto; } .xm-stage { overflow:visible; } .xm-win { margin:0; }
+</style><main><div class="xm-stage"><div class="xm-dialog"></div></div></main>
+<script>
+(() => {
+  const OCR_MM = ['PP-OCRv6', 'Medium det', 'Medium rec'];
+  const PIVOT = ['Nhật → Anh → Việt', 'Anh → Việt'];
+  const DIRECT = ['Nhật → Việt', 'Anh → Việt'];
+  const P = [
+    { name: 'Flash', ocr: ['PP-OCRv6', 'Small det', 'Small rec'], model: ['Mitsua ElanMT', 'VinAI v2'], sep: ' → ', route: PIVOT },
+    { name: 'Medium', ocr: ['PP-OCRv6', 'Medium det', 'Small rec'], model: ['NLLB-200 Distilled 600M', 'VinAI v2'], sep: ' → ', route: PIVOT },
+    { name: 'High', ocr: OCR_MM, model: ['Qwen3.5-2B', 'Q4_K_M'], sep: ' ', route: DIRECT },
+    { name: 'Ultra', ocr: OCR_MM, model: ['Qwen3.5-4B', 'Q4_K_M'], sep: ' ', route: DIRECT },
+    { name: 'Extreme', ocr: OCR_MM, model: ['Qwen3.5-9B', 'Q4_K_M'], sep: ' ', route: DIRECT },
+    { name: 'Ultimate', ocr: OCR_MM, model: ['Qwen3.8-27B', 'Q4_K_M'], sep: ' ', route: DIRECT },
+  ];
+  const W = 374, START = 14, SEG = (W - 2 * START) / 5, HIGH = 2, ULTRA = 3, EXTREME = 4, LAST = 5;
+  const GATES = [ULTRA, EXTREME, LAST];
+  const GOLD = [255,154,61];
+  const sky = new Image(); sky.src = "data:image/png;base64,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"; document.documentElement.style.setProperty("--sky", "url("+sky.src+")");
+  const GW = 372, TW = 744, TH = 24;
+  const BLUE = [59, 130, 246], INDIGO = [99, 102, 241];
+  const BORDER_LOW = [58, 58, 82], BORDER_HIGH = [83, 85, 195];
+  const NAME = [233, 236, 250];
+  const SEL_BLUE = [51, 74, 115], SEL_HIGH = [58, 60, 122];
+  const NEB = { acc: [143, 160, 255], sel: [60, 68, 140], name: [214, 224, 255] };
+  const JADE = { acc: [104, 236, 128], sel: [38, 104, 62], name: [212, 255, 214] };
+  const CRYS = '<svg class="xm-crys" viewBox="0 0 12 14" aria-hidden="true"><use href="#xm-crystal"/></svg>';
+
+  const S = () => 1;
+  const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+  const mix = (a, b, k) => a.map((v, i) => v + (b[i] - v) * k);
+  const rgb = c => `rgb(${c.map(Math.round).join(',')})`;
+  const csv = c => c.map(Math.round).join(',');
+  const easeOutCubic = k => 1 - (1 - k) ** 3;
+  const easeOutBack = k => 1 + 2.70158 * (k - 1) ** 3 + 1.70158 * (k - 1) ** 2;
+  const now = () => performance.now();
+  const gateAbove = index => GATES.find(g => g > index);
+  const mulberry32 = seed => () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const rnd = mulberry32(20261123);
+  const R = (a, b) => a + (b - a) * rnd();
+
+  function surface() {
+    const canvas = document.createElement('canvas');
+    canvas.width = TW * dpr; canvas.height = TH * dpr;
+    const g = canvas.getContext('2d');
+    g.scale(dpr, dpr);
+    return [canvas, g];
+  }
+
+  function blob(g, x, y, rx, ry, rot, color, alpha, op) {
+    g.globalCompositeOperation = op;
+    for (const dx of [-TW, 0, TW]) {
+      g.save(); g.translate(x + dx, y); g.rotate(rot); g.scale(rx, ry);
+      const gradient = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+      gradient.addColorStop(0, `rgba(${color},${alpha})`); gradient.addColorStop(1, `rgba(${color},0)`);
+      g.fillStyle = gradient; g.beginPath(); g.arc(0, 0, 1, 0, Math.PI * 2); g.fill(); g.restore();
+    }
+  }
+
+  function stars(g, count, color) {
+    g.globalCompositeOperation = 'source-over';
+    for (let i = 0; i < count; i++) {
+      const size = rnd() < 0.85 ? 1 : 1.5;
+      g.fillStyle = `rgba(${color},${R(.25, .85)})`;
+      g.fillRect(R(0, TW), R(0, TH), size, size);
+    }
+  }
+
+  function makeNebula() {
+    const [canvas, g] = surface();
+    const base = g.createLinearGradient(0, 0, 0, TH);
+    base.addColorStop(0, '#56649f'); base.addColorStop(0.5, '#444882'); base.addColorStop(1, '#3a316d');
+    g.fillStyle = base; g.fillRect(0, 0, TW, TH);
+    for (let i = 0; i < 14; i++) blob(g, R(0, TW), R(14, 26), R(30, 70), R(7, 13), R(-.2, .2), '95,94,189', R(.35, .6), 'source-over');
+    for (let i = 0; i < 12; i++) blob(g, R(0, TW), R(6, 16), R(20, 45), R(5, 9), R(-.3, .3), '47,42,94', R(.3, .5), 'source-over');
+    for (let i = 0; i < 18; i++) blob(g, R(0, TW), R(-2, 10), R(25, 80), R(3, 7), R(-.45, .15), '108,138,194', R(.35, .6), 'screen');
+    for (let i = 0; i < 12; i++) blob(g, R(0, TW), R(0, 8), R(12, 35), R(1.5, 4), R(-.5, .1), '127,163,219', R(.35, .6), 'screen');
+    stars(g, 90, '170,200,245');
+    return canvas;
+  }
+
+  function makeAuroraBase() {
+    const [canvas, g] = surface();
+    const base = g.createLinearGradient(0, 0, 0, TH);
+    base.addColorStop(0, '#1f7030'); base.addColorStop(0.5, '#175a29'); base.addColorStop(1, '#0e401f');
+    g.fillStyle = base; g.fillRect(0, 0, TW, TH);
+    for (let i = 0; i < 14; i++) blob(g, R(0, TW), R(4, 22), R(30, 70), R(6, 12), R(-.25, .25), '8,46,22', R(.35, .55), 'source-over');
+    for (let i = 0; i < 16; i++) blob(g, R(0, TW), R(2, 20), R(25, 60), R(4, 9), R(-.4, .3), '52,150,70', R(.3, .5), 'screen');
+    for (let i = 0; i < 10; i++) blob(g, R(0, TW), R(0, 14), R(14, 40), R(1.5, 4), R(-.5, .2), '130,225,125', R(.2, .35), 'screen');
+    stars(g, 80, '190,255,190');
+    return canvas;
+  }
+
+  function makeAuroraRibbons() {
+    const [canvas, g] = surface();
+    const ribbon = (wave, width, color, alpha, blur) => {
+      g.save();
+      g.filter = blur ? `blur(${blur}px)` : 'none';
+      g.strokeStyle = `rgba(${color},${alpha})`; g.lineWidth = width; g.lineCap = 'round';
+      g.beginPath();
+      for (let x = -12; x <= TW + 12; x += 3) {
+        const y = wave(x);
+        if (x === -12) g.moveTo(x, y); else g.lineTo(x, y);
+      }
+      g.stroke(); g.restore();
+    };
+    for (let i = 0; i < 5; i++) {
+      const k1 = [2, 3, 4][i % 3], k2 = [5, 7][i % 2];
+      const y0 = R(6, 18), a1 = R(3, 7), a2 = R(1, 3), p1 = R(0, Math.PI * 2), p2 = R(0, Math.PI * 2);
+      const wave = x => y0 + a1 * Math.sin(x / TW * Math.PI * 2 * k1 + p1) + a2 * Math.sin(x / TW * Math.PI * 2 * k2 + p2);
+      ribbon(wave, R(4, 8), '120,230,120', R(.25, .4), 3);
+      ribbon(wave, R(.8, 1.6), '205,255,200', R(.35, .6), .6);
+    }
+    return canvas;
+  }
+
+  let nebula, auroraBase, auroraRibbons;
+  const makeSparks = (count, small, big) => Array.from({ length: count }, (_, i) => ({
+    x: (i + R(.15, .85)) * TW / count, y: R(5, 19), size: i % 5 === 1 ? R(...big) : R(...small),
+    period: R(1400, 2800), phase: R(0, Math.PI * 2), still: R(.55, 1),
+  }));
+  const SPARKS_N = makeSparks(14, [2.5, 4.5], [5.5, 7]);
+  const SPARKS_A = makeSparks(16, [2.2, 4], [5, 6.5]);
+  const PAL_N = ['rgba(200,215,255,.55)', 'rgba(160,170,255,0)', '#f4f8ff'];
+  const PAL_A = ['rgba(200,255,190,.6)', 'rgba(110,230,120,0)', '#f3fff0'];
+
+  function sparkle(g, x, y, size, alpha, [halo0, halo1, core]) {
+    g.save(); g.translate(x, y); g.globalAlpha = alpha;
+    const halo = g.createRadialGradient(0, 0, 0, 0, 0, size * 2.2);
+    halo.addColorStop(0, halo0); halo.addColorStop(1, halo1);
+    g.fillStyle = halo; g.beginPath(); g.arc(0, 0, size * 2.2, 0, Math.PI * 2); g.fill();
+    const k = size * 0.22;
+    g.fillStyle = core; g.beginPath();
+    g.moveTo(0, -size); g.quadraticCurveTo(k, -k, size, 0); g.quadraticCurveTo(k, k, 0, size);
+    g.quadraticCurveTo(-k, k, -size, 0); g.quadraticCurveTo(-k, -k, 0, -size); g.fill();
+    g.restore();
+  }
+
+  let driftN = 0, driftA = 0, driftR = 0, twinkle = 0;
+
+  function tiled(g, image, drift) {
+    const offset = drift % TW;
+    g.drawImage(image, offset - TW, 0, TW, TH);
+    g.drawImage(image, offset, 0, TW, TH);
+  }
+
+  function sparks(g, list, drift, level, palette) {
+    const offset = drift % TW;
+    for (const spark of list) {
+      const x = (spark.x + offset) % TW;
+      if (x > GW + 12) continue;
+      const k = 0.5 + 0.5 * Math.sin(twinkle / spark.period * Math.PI * 2 + spark.phase);
+      sparkle(g, x, spark.y, spark.size * (0.45 + 0.55 * k * k), (0.3 + 0.7 * k) * level, palette);
+    }
+  }
+
+  function createDialog(host) {
+    host.innerHTML = `
+      <div class="xm-win" data-tier="base" data-animation="off" inert>
+        <h1 class="xm-title"><span class="tier-text">Cài đặt Live Trans</span></h1>
+        <div class="xm-box">
+          <div class="xm-sky"></div><svg class="xm-bolts" viewBox="0 0 400 100" preserveAspectRatio="none" aria-hidden="true"></svg><div class="xm-box-glow"><i></i></div>
+        <div class="xm-panel">
+          <div class="xm-slider" tabindex="0" role="slider" aria-valuemin="0" aria-valuemax="5" aria-label="Nấc dịch">
+            <div class="xm-track"><div class="xm-fill"><canvas class="xm-fx"></canvas></div></div>
+            <div class="xm-ahead"></div>
+            <div class="xm-outline"></div>
+            ${P.map((_, i) => `<span class="xm-dot" style="left:${(START + SEG * i) / W * 100}%"></span>`).join('')}
+            <div class="xm-contact"></div>
+            <div class="xm-wave"></div>
+            <div class="xm-knob"><div class="xm-glow"><i></i></div><div class="xm-thumb"></div><div class="xm-core"></div></div>
+          </div>
+          <div class="xm-labels">${P.map(p => `<button type="button">${p.name}</button>`).join('')}</div>
+          </div>
+          <div class="xm-specs">
+            <div class="xm-name"></div><div class="xm-line xm-ocr"></div><div class="xm-line xm-model"></div><div class="xm-line xm-route"></div>
+          </div>
+        </div>
+        <label class="interface-row"><span id="interface-label">Giao diện</span>
+          <select id="settings-interface">
+            <option value="minimal">Tối giản</option>
+            <option value="advanced">Nâng cao</option>
+          </select>
+        </label>
+        <label class="interface-row"><span id="crop-count-label">Số vùng dịch</span>
+          <select id="crop-count"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select>
+        </label>
+        <label class="interface-row" id="history-row" hidden><span id="history-turns-label">Lượt thoại trong ngữ cảnh</span>
+          <select id="history-turns"><option value="0">Tắt</option><option value="2">2</option><option value="3">3</option></select>
+        </label>
+        <label class="animation-row"><span>Animation</span><input id="animation-enabled" type="checkbox" role="switch"></label>
+        <details class="advanced">
+          <summary><span class="tier-text">Nâng cao</span></summary>
+          <div class="settings-form">
+            <label class="field"><span class="tier-text">Dò vùng chữ (det)</span>
+              <select id="det"><option value="small">PP-OCRv6 Small</option><option value="medium">PP-OCRv6 Medium</option></select>
+            </label>
+            <label class="field"><span class="tier-text">Đọc nội dung (rec)</span>
+              <select id="rec"><option value="small">PP-OCRv6 Small</option><option value="medium">PP-OCRv6 Medium</option></select>
+            </label>
+            <label class="field"><span class="tier-text">Luồng dịch</span>
+              <select id="flow">
+                <option value="pivot">Nhật → Anh → Việt · Anh → Việt</option>
+                <option value="direct">Nhật → Việt · Anh → Việt</option>
+              </select>
+            </label>
+            <div class="settings-subset" id="pivot-fields" hidden>
+              <label class="field"><span>Mô hình Nhật → Anh</span>
+                <select id="ja-model"><option value="mitsua">Mitsua ElanMT</option><option value="nllb">NLLB-200 Distilled 600M</option></select>
+              </label>
+            </div>
+            <div class="settings-subset" id="qwen-fields">
+              <label class="field"><span class="tier-text" id="context-label"></span>
+                <input id="context" type="number" value="1000" min="1000" max="25000" step="1" required>
+              </label>
+              <label class="field"><span class="tier-text" id="qwen-backend-label"></span>
+                <select id="qwen-backend" aria-describedby="qwen-backend-hint"></select>
+              </label>
+              <p class="settings-note" id="qwen-backend-hint"></p>
+              <p class="rule-current"><span id="rule-label">Quy tắc chung</span> · <span class="tier-text" id="active-rule"></span></p>
+              <p class="settings-note" id="rule-hint">Áp dụng cho tất cả vùng khi dùng Qwen. Bấm Lưu để áp dụng.</p>
+              <button class="settings-action" id="manage-rules" type="button"><span class="tier-text">Quản lý quy tắc</span></button>
+            </div>
+          </div>
+        </details>
+        <div class="settings-footer">
+          <p class="settings-note" id="preview-note" role="status">Áp dụng ở lần Bắt đầu tiếp theo.</p>
+          <button class="settings-action" id="save" type="button">Lưu</button>
+        </div>
+      </div>`;
+    const $ = s => host.querySelector(s);
+    const win = $('.xm-win'), box = $('.xm-box'), boxGlow = $('.xm-box-glow'), boxGlowI = $('.xm-box-glow i');
+    const nameEl = $('.xm-name'), ocrEl = $('.xm-ocr'), modelEl = $('.xm-model'), routeEl = $('.xm-route');
+    const slider = $('.xm-slider'), fill = $('.xm-fill'), fx = $('.xm-fx'), ahead = $('.xm-ahead'), outline = $('.xm-outline');
+    const contact = $('.xm-contact'), wave = $('.xm-wave'), knob = $('.xm-knob'), glow = $('.xm-glow'), glowI = $('.xm-glow i');
+    const thumb = $('.xm-thumb'), core = $('.xm-core');
+    const buttons = [...host.querySelectorAll('.xm-labels button')];
+    fx.width = GW * dpr; fx.height = TH * dpr;
+    const g = fx.getContext('2d');
+    g.scale(dpr, dpr);
+    const pickU = new Set(['name', 'ocr:1', 'ocr:2', 'model:0']);
+    const pickX = new Set(['name', 'ocr:1', 'ocr:2', 'model:0', 'model:1', 'route:0']);
+    const crystals = new Set(['name', 'model:0']);
+    const st = {};
+
+    const det = $('#det'), rec = $('#rec'), flow = $('#flow'), jaModel = $('#ja-model');
+    const context = $('#context'), note = $('#preview-note'), save = $('#save');
+    const backend = $('#qwen-backend');
+    const animation = $('#animation-enabled');
+    const settingsInterface = $('#settings-interface');
+    const cropCount = $('#crop-count'), historyTurns = $('#history-turns');
+    let boot = null, ruleName = null, qwenModel = '4b', locked = false, busy = false, serial = 0;
+    const hasQwen = () => flow.value === 'direct';
+    const labels = {
+      VI: {title:'Cài đặt Live Trans', advanced:'Nâng cao', det:'Dò vùng chữ (det)', rec:'Đọc nội dung (rec)', flow:'Luồng dịch', ja:'Mô hình Nhật → Anh', pivot:'Nhật → Anh → Việt · Anh → Việt', direct:'Nhật → Việt · Anh → Việt', rule:'Quy tắc chung', ruleHint:'Áp dụng cho tất cả vùng khi dùng Qwen. Bấm Lưu để áp dụng.', none:'Không có', manage:'Quản lý quy tắc', save:'Lưu', guide:'Áp dụng ở lần Bắt đầu tiếp theo.', custom:'Tùy chỉnh', error:'Chưa lưu được cài đặt.'},
+      EN: {title:'Live Trans settings', advanced:'Advanced', det:'Find text regions (det)', rec:'Read text (rec)', flow:'Translation flow', ja:'Japanese → English model', pivot:'Japanese → English → Vietnamese · English → Vietnamese', direct:'Japanese → Vietnamese · English → Vietnamese', rule:'Shared rule', ruleHint:'Applies to all regions when using Qwen. Select Save to apply.', none:'None', manage:'Manage rules', save:'Save', guide:'Applies the next time you press Start.', custom:'Custom', error:'Settings could not be saved.'}
+    };
+    let T = labels.VI;
+    const draft = () => ({
+      det:det.value, rec:rec.value, ja_model:jaModel.value, flow:flow.value, qwen_model:qwenModel,
+      qwen_context:context.value, qwen_backend:backend.value,
+      animation_enabled:animation.checked, settings_interface:settingsInterface.value,
+      crop_count:Number(cropCount.value), history_turns:Number(historyTurns.value)
+    });
+    function match(d) { return boot.presets.find(p => p.det === d.det && p.rec === d.rec && p.flow === d.flow && (d.flow === 'direct' ? p.qwen_model === d.qwen_model : p.ja_model === d.ja_model)); }
+    function routeIndex(d) { const i = boot.presets.findIndex(p => p.flow === d.flow && (d.flow === 'direct' ? p.qwen_model === d.qwen_model : p.ja_model === d.ja_model)); return i < 0 ? 0 : i; }
+    function renderFields() {
+      $('#pivot-fields').hidden = hasQwen(); $('#qwen-fields').hidden = !hasQwen();
+      $('#history-row').hidden = !hasQwen();
+      $('.animation-row').hidden = settingsInterface.value === 'minimal';
+      settingsInterface.disabled = animation.disabled = cropCount.disabled = historyTurns.disabled = busy;
+      backend.disabled = busy;
+      $('#context-label').textContent = T === labels.EN ? `${boot.qwen_models[qwenModel]} context (tokens)` : `Context ${boot.qwen_models[qwenModel]} (token)`;
+      $('#active-rule').textContent = ruleName || T.none; flow.disabled = locked || busy;
+    }
+    async function validate() {
+      if (!boot) return; const n = ++serial;
+      try { const result = await window.pywebview.api.validate(draft()); if (n !== serial) return; note.textContent = result.message || T.guide; note.style.color = result.ok ? '' : '#f38ba8'; }
+      catch (error) { if (n === serial) { note.textContent = T.error; note.style.color = '#f38ba8'; } }
+    }
+    function changed() {
+      const selection = draft();
+      const preset = match(selection);
+      if (preset) locked = preset.name === 'Flash' || preset.name === 'Medium';
+      const index = routeIndex(selection);
+      if (index !== st.index) reset(index, false); else renderSummary();
+      renderFields();
+      validate();
+    }
+    [det, rec, flow, jaModel].forEach(field => field.addEventListener('change', changed)); context.addEventListener('input', changed);
+    [cropCount, historyTurns, backend].forEach(field => field.addEventListener('change', validate));
+    settingsInterface.addEventListener('change', () => { renderFields(); validate(); });
+    function applyAnimation() {
+      win.dataset.animation = animation.checked ? 'on' : 'off';
+      if (!animation.checked) {
+        box.getAnimations({subtree:true}).forEach(effect => effect.cancel());
+        slider.querySelectorAll('.xm-wave').forEach(ring => { if (ring !== wave) ring.remove(); });
+      }
+      reset(st.index, false);
+      refresh();
+    }
+    animation.addEventListener('change', applyAnimation);
+    $('#manage-rules').addEventListener('click', async () => {
+      if (busy) return; busy = true; $('#manage-rules').disabled = save.disabled = true; renderFields();
+      win.inert = true;
+      try {
+        const themePreset = animation.checked ? boot.presets[st.index].name : null;
+        const result = await window.pywebview.api.manage_rules(themePreset);
+        ruleName = result.rule_name;
+      }
+      catch (error) { note.textContent = T.error; }
+      finally {
+        win.inert = false; busy = false; $('#manage-rules').disabled = save.disabled = false;
+        renderFields(); validate();
+      }
+    });
+    document.addEventListener('keydown', async e => {
+      if (e.key !== 'Escape' || !boot || busy || win.inert) return;
+      e.preventDefault(); busy = true;
+      try { await window.pywebview.api.close(); } catch (error) { busy = false; note.textContent = T.error; }
+    });
+    save.addEventListener('click', async () => {
+      if (busy) return; busy = true; save.disabled = $('#manage-rules').disabled = true; renderFields(); ++serial;
+      try { const result = await window.pywebview.api.save(draft()); if (result.ok) { await window.pywebview.api.close(); return; } note.textContent = result.message || T.error; note.style.color = '#f38ba8'; }
+      catch (error) { note.textContent = T.error; note.style.color = '#f38ba8'; }
+      finally { busy = false; save.disabled = $('#manage-rules').disabled = false; renderFields(); }
+    });
+    async function bootstrap() {
+      if (boot) return; const data = await window.pywebview.api.bootstrap(); boot = data; T = labels[data.language] || labels.EN;
+      document.documentElement.lang = data.language.toLowerCase(); document.title = T.title;
+      $('.xm-title span').textContent = T.title; $('.advanced summary span').textContent = T.advanced;
+      const fields = [...host.querySelectorAll('.settings-form > .field')];
+      fields[0].querySelector('span').textContent = T.det; fields[1].querySelector('span').textContent = T.rec; fields[2].querySelector('span').textContent = T.flow;
+      $('#pivot-fields .field span').textContent = T.ja; flow.options[0].textContent = T.pivot; flow.options[1].textContent = T.direct;
+      $('#rule-label').textContent = T.rule; $('#rule-hint').textContent = T.ruleHint;
+      $('#manage-rules span').textContent = T.manage; save.textContent = T.save;
+      const s = data.settings; det.value = s.det; rec.value = s.rec; flow.value = s.flow; jaModel.value = s.ja_model;
+      qwenModel = s.qwen_model; context.value = s.qwen_context; context.min = data.context_min; context.max = data.context_max; ruleName = s.rule_name;
+      $('#qwen-backend-label').textContent = data.qwen_backend_label;
+      $('#qwen-backend-hint').textContent = data.qwen_backend_hint;
+      backend.replaceChildren(...Object.entries(data.qwen_backends).map(([value, label]) => new Option(label, value)));
+      backend.value = s.qwen_backend;
+      $('#interface-label').textContent = T === labels.EN ? 'Interface' : 'Giao diện';
+      settingsInterface.options[0].textContent = T === labels.EN ? 'Minimal' : 'Tối giản';
+      settingsInterface.options[1].textContent = T.advanced;
+      settingsInterface.value = s.settings_interface || 'advanced';
+      $('#crop-count-label').textContent = data.crop_labels.count;
+      $('#history-turns-label').textContent = data.crop_labels.history;
+      historyTurns.options[0].textContent = data.crop_labels.off;
+      cropCount.value = s.crop_count;
+      historyTurns.value = s.history_turns;
+      animation.checked = s.animation_enabled === true;
+      const m = match(draft()); locked = !!m && (m.name === 'Flash' || m.name === 'Medium');
+      st.index = m ? data.presets.indexOf(m) : routeIndex(draft());
+      applyAnimation();
+      renderFields(); win.inert = false; validate();
+    }
+
+    function tween(key, to, dur, ease = easeOutCubic) { st.tweens[key] = { from: st[key], to, start: now(), dur: dur * S(), ease }; }
+    function setNow(key, value) { delete st.tweens[key]; st[key] = value; }
+    function moveTo(target, dur, ease = easeOutCubic, done) { st.target = target; st.anim = { from: st.display, start: now(), dur: dur * S(), ease, done }; }
+    function retarget(target, smooth) {
+      if (!st.anim && smooth) moveTo(target, 80);
+      else st.target = target;
+    }
+
+    function renderSpecs() {
+      if (!boot) return; const preset = boot.presets[st.index];
+      det.value = preset.det; rec.value = preset.rec; flow.value = preset.flow;
+      locked = preset.name === 'Flash' || preset.name === 'Medium';
+      if (preset.flow === 'direct') qwenModel = preset.qwen_model; else jaModel.value = preset.ja_model;
+      renderFields(); renderSummary(); validate();
+    }
+
+    function renderSummary() {
+      if (!boot) return; const preset = match(draft());
+      const model = hasQwen() ? [boot.qwen_models[qwenModel]] : [jaModel.selectedOptions[0].textContent, 'VinAI v2'];
+      const ocr = ['PP-OCRv6', det.value === 'medium' ? 'Medium det' : 'Small det', rec.value === 'medium' ? 'Medium rec' : 'Small rec'];
+      slider.setAttribute('aria-valuenow', st.index); slider.setAttribute('aria-valuetext', preset ? preset.name : T.custom);
+      const tok = (key, text) => {
+        const cls = `xm-tok${pickU.has(key) ? ' on-u' : ''}${pickX.has(key) ? ' on-x' : ''}`;
+        return `<span class="${cls}" data-key="${key}" data-choice="tok-${key}">${text}</span>${crystals.has(key) ? CRYS : ''}`;
+      };
+      const line = (role, parts, sep) => parts.map((text, i) => tok(`${role}:${i}`, text)).join(sep);
+      nameEl.innerHTML = tok('name', preset ? preset.name : T.custom);
+      nameEl.classList.toggle('is-custom', !preset);
+      ocrEl.innerHTML = line('ocr', ocr, ' · ');
+      modelEl.innerHTML = line('model', model, hasQwen() ? ' ' : ' → ');
+      routeEl.innerHTML = line('route', [hasQwen() ? T.direct : T.pivot], ' · ');
+    }
+
+    let nextStorm = 0;
+    function storm(t) {
+      const bolts = $('.xm-bolts');
+      bolts.replaceChildren();
+      const count = Math.random() < .5 ? 3 : 4;
+      for (let i = 0; i < count; i++) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+        let x = (i + Math.random()) * 400 / count;
+        const points = [`M ${x} 0`];
+        for (let y = 8; y < 100; y += R(7,16)) {
+          x += R(-15,12); points.push(`L ${x} ${y}`);
+        }
+        path.setAttribute('d',points.join(' ')); path.setAttribute('fill','none');
+        path.setAttribute('stroke','#ffebbb'); path.setAttribute('stroke-width','1.4');
+        path.style.filter='drop-shadow(0 0 3px #ffa239)'; path.style.opacity=0;
+        bolts.append(path);
+        path.animate([{opacity:0},{opacity:.95,offset:.1},{opacity:.26,offset:.45},{opacity:0}],{duration:220*S(),delay:i*65*S()});
+      }
+      nextStorm=t+R(3000,5000)*S();
+    }
+    function commit(index) {
+      const old = st.index;
+      if (index === old) return;
+      st.index = index;
+      if(index===LAST || old===LAST){
+        tween('gold',index===LAST?1:0,index===LAST?140:250);
+        nextStorm=now()+R(3000,5000)*S();
+        if(old===LAST){$('.xm-bolts').replaceChildren();setNow('tension',0);}
+      }
+      renderSpecs();
+      if (old >= ULTRA && index < ULTRA) { tween('eU', 0, 300); st.armed = false; }
+      if (old < ULTRA && index >= ULTRA) tween('eU', 1, 200);
+      if (old >= EXTREME && index < EXTREME) { tween('eX', 0, 250); tween('crys', 0, 200); st.armed = false; }
+      if (old < EXTREME && index >= EXTREME) { tween('eX', 1, 200); tween('crys', 1, 260, easeOutBack); st.shim = 0; }
+    }
+
+    function flashName(color) {
+      nameEl.animate([
+        { filter: 'brightness(1.7)', textShadow: `0 0 12px rgb(${color}), 0 0 3px #fff` },
+        { filter: 'brightness(1)', textShadow: `0 0 0 rgba(${color},0)` },
+      ], { duration: 320 * S(), easing: 'ease-out' });
+    }
+
+    function ignite(gate) {
+      setNow('eU', 1);
+      if(gate===LAST){st.shim=-300;return flashName(csv(GOLD));}
+      if (gate !== EXTREME) return flashName(csv(NEB.acc));
+      setNow('eX', 1);
+      st.crys = 0;
+      tween('crys', 1, 260, easeOutBack);
+      st.shim = -300;
+      flashName(csv(JADE.acc));
+    }
+
+    function arrive(gate) {
+      if(gate===LAST){
+        thumb.animate([{transform:'scale(1.25)'},{transform:'scale(.94)',offset:.55},{transform:'scale(1)'}],{duration:230*S()});
+        box.animate([0,3,-3,1,0].map(x=>({transform:`translateX(${x}px)`})),{duration:150*S()});
+        for(const [i,color] of ['#ff643c','#ffeaaa'].entries()){
+          const ring=wave.cloneNode(); slider.append(ring);
+          Object.assign(ring.style,{left:((START+SEG*gate)/W*100)+'%',borderColor:color,boxShadow:'0 0 6px '+color});
+          ring.animate([{width:'24px',height:'24px',opacity:.95},{width:'740px',height:'68px',opacity:0}],{duration:470*S(),delay:i*90*S()}).onfinish=()=>ring.remove();
+        }
+        return;
+      }
+      const extreme = gate === EXTREME;
+      thumb.animate(extreme
+        ? [{ transform: 'scale(1.18)' }, { transform: 'scale(.97)', offset: .7 }, { transform: 'scale(1)' }]
+        : [{ transform: 'scale(1.12)' }, { transform: 'scale(1)' }],
+      { duration: (extreme ? 140 : 120) * S(), easing: 'ease-out' });
+      wave.style.left = `${(START + SEG * gate) / W * 100}%`;
+      wave.style.setProperty('--wave', csv((extreme ? JADE : NEB).acc));
+      wave.animate(extreme ? [
+        { width: '26px', height: '26px', opacity: 1, borderWidth: '2.5px' },
+        { width: '64px', height: '44px', opacity: 0, borderWidth: '1px' },
+      ] : [
+        { width: '26px', height: '26px', opacity: .95, borderWidth: '2px' },
+        { width: '46px', height: '46px', opacity: 0, borderWidth: '1px' },
+      ], { duration: (extreme ? 240 : 200) * S(), easing: 'cubic-bezier(.2,.7,.3,1)' });
+    }
+
+    function unlock(gate) {
+      commit(gate);
+      ignite(gate);
+      tween('tension', 0, 150);
+      st.mode = 'hold';
+      moveTo(gate, 90, easeOutCubic, () => arrive(gate));
+    }
+
+    function zoneGate() {
+      const gate = gateAbove(st.index);
+      return gate && st.armed && st.u > gate - .7 && st.u < gate - (gate === LAST ? .1 : .3) ? gate : 0;
+    }
+
+    function handleMove(u, press) {
+      if (!animation.checked) {
+        const index = Math.round(u);
+        if (press || index !== st.index) select(index);
+        st.dragging = true;
+        return;
+      }
+      st.u = u;
+      const gate = gateAbove(st.index);
+      if (gate && u <= gate - .7) st.armed = true;
+      if (gate && u >= gate - (gate === LAST ? .1 : .3)) {
+        const next = Math.round(u);
+        if (next === gate) return unlock(gate);
+        commit(next);
+      } else {
+        commit(gate ? Math.min(gate - 1, Math.round(u)) : Math.round(u));
+      }
+      let target = u, mode = 'free';
+      const zone = zoneGate();
+      if (zone) {
+        const depth = u - (zone - .7), t = depth / (zone === LAST ? .6 : .4);
+        setNow('tension', t);
+        st.tGate = zone;
+        const lag = zone === LAST ? 4 + 2*t : zone === EXTREME ? 3 + t : 2.5;
+        target = u - clamp(depth / .05) * lag / SEG;
+        mode = 'zone';
+      } else {
+        if (!st.tweens.tension) st.tension = 0;
+        if (GATES.includes(st.index) && Math.abs(u - st.index) <= .3) { target = st.index; mode = 'hold'; }
+      }
+      retarget(target, press || mode !== st.mode);
+      st.mode = mode;
+    }
+
+    function release() {
+      st.dragging = false;
+      if (!animation.checked) return;
+      const zone = zoneGate();
+      if (zone) {
+        st.springBack = zone - 1;
+        tween('tension', 0, 260);
+        moveTo(zone - 1, 260, easeOutBack, () => { st.springBack = null; });
+      } else if (st.anim) {
+        st.target = st.index;
+      } else {
+        moveTo(st.index, 120);
+      }
+    }
+
+    function select(index) {
+      index = clamp(index, 0, LAST);
+      if (index === st.index) { renderSpecs(); return; }
+      if (!animation.checked) { reset(index); return; }
+      const old = st.index;
+      commit(index);
+      if (GATES.includes(index) && old < index) {
+        ignite(index);
+        moveTo(index, 120, easeOutCubic, () => arrive(index));
+      } else {
+        moveTo(index, 120);
+      }
+    }
+
+    function reset(index, apply = true) {
+      Object.assign(st, {
+        gold: index===LAST ? 1 : 0, index, display: index, target: index, anim: null, dragging: false, u: index, armed: true,
+        springBack: null, tension: 0, tGate: 0, tweens: {}, mode: null,
+        eU: index >= ULTRA ? 1 : 0, eX: index >= EXTREME ? 1 : 0, crys: index >= EXTREME ? 1 : 0,
+        boxBase: (index < HIGH ? BORDER_LOW : BORDER_HIGH).slice(), breath: 0, shim: 0,
+      });
+      if (apply) renderSpecs(); else renderSummary();
+      if (!animation.checked) renderStatic();
+    }
+
+    function drawFx(uLevel, xLevel, fillWidth) {
+      g.clearRect(0, 0, GW, TH);
+      if (uLevel > .001) {
+        g.globalAlpha = uLevel;
+        tiled(g, nebula ??= makeNebula(), driftN);
+        g.globalAlpha = 1;
+        sparks(g, SPARKS_N, driftN, uLevel, PAL_N);
+      }
+      if (xLevel > .001) {
+        g.globalAlpha = xLevel;
+        tiled(g, auroraBase ??= makeAuroraBase(), driftA);
+        tiled(g, auroraRibbons ??= makeAuroraRibbons(), driftR);
+        g.globalAlpha = 1;
+        sparks(g, SPARKS_A, driftR, xLevel, PAL_A);
+      }
+      const heat = Math.max(st.gold, st.tGate===LAST ? st.tension : 0);
+      if(heat && sky.naturalWidth){
+        g.save(); g.globalAlpha=heat;
+        const w=144, offset=driftA%(2*w);
+        for(let i=-2;i<4;i++){
+          g.save();g.translate(i*w+offset+(i%2?w:0),0);g.scale(i%2?-1:1,1);
+          g.drawImage(sky,0,0,w,TH);g.restore();
+        }
+        g.restore();
+        sparks(g,SPARKS_A,driftR,heat,['rgba(255,190,96,.5)','rgba(255,150,0,0)','#fff4be']);
+      }
+      const period = st.index===LAST ? 7200 : 2200;
+      if (st.index < EXTREME || st.shim < 0) return;
+      const k = (st.shim % period) / period, travel = .78;
+      if (k >= travel) return;
+      const x = -40 + (fillWidth + 80) * (k / travel);
+      g.save();
+      g.translate(x, 0);
+      g.transform(1, 0, -.6, 1, 0, 0);
+      const streak = g.createLinearGradient(-30, 0, 30, 0);
+      streak.addColorStop(0, 'rgba(210,255,200,0)');
+      streak.addColorStop(.5, 'rgba(232,255,220,.6)');
+      streak.addColorStop(1, 'rgba(210,255,200,0)');
+      g.globalCompositeOperation = 'screen';
+      g.fillStyle = streak;
+      g.fillRect(-30, 0, 60 + TH, TH);
+      g.restore();
+    }
+
+    function update(t, dt) {
+      for (const [key, tw] of Object.entries(st.tweens)) {
+        const k = clamp((t - tw.start) / tw.dur);
+        st[key] = tw.from + (tw.to - tw.from) * tw.ease(k);
+        if (k >= 1) delete st.tweens[key];
+      }
+      if (st.anim) {
+        const a = st.anim, k = clamp((t - a.start) / a.dur);
+        st.display = a.from + (st.target - a.from) * a.ease(k);
+        if (k >= 1) { st.anim = null; st.display = st.target; if (a.done) a.done(); }
+      } else {
+        st.display = st.target;
+      }
+      st.boxBase = mix(st.boxBase, st.index < HIGH ? BORDER_LOW : BORDER_HIGH, 1 - Math.exp(-dt / (60 * S())));
+      st.breath = (st.breath + dt / ((2000 - 500 * clamp(st.eX) - 500*st.gold) * S())) % 1;
+      if(st.index===LAST && t>=nextStorm) storm(t);
+      if (st.index >= EXTREME) st.shim += dt / S();
+    }
+
+    let sliderWidth = slider.clientWidth;
+    new ResizeObserver(() => {
+      sliderWidth = slider.clientWidth;
+      slider.style.setProperty('--fx-width', Math.max(0, sliderWidth - 2) + 'px');
+      if (!animation.checked) renderStatic();
+    }).observe(slider);
+    function paintButtons(selectedColor) {
+      buttons.forEach((button, i) => {
+        const selected = i === st.index;
+        button.style.background = selected ? selectedColor : '';
+        button.setAttribute('aria-pressed', String(selected));
+      });
+    }
+    function renderStatic() {
+      const x = (START + SEG * st.index) / W * sliderWidth;
+      win.dataset.tier = 'base';
+      knob.style.transform = `translateX(${x}px)`;
+      fill.style.width = `${st.index / LAST * 100}%`;
+      fill.style.background = '#3b82f6';
+      $('.xm-track').style.transform = '';
+      nameEl.style.color = '';
+      paintButtons(rgb(SEL_BLUE));
+    }
+    function render() {
+      const p = st.display, x = (START + SEG * p) / W * sliderWidth;
+      const theme = { acc: mix(NEB.acc, JADE.acc, clamp(st.eX)), sel: mix(NEB.sel, JADE.sel, clamp(st.eX)), name: mix(NEB.name, JADE.name, clamp(st.eX)) };
+      const tensionGold=st.tGate===LAST?st.tension:0;
+      const heat=Math.max(st.gold,tensionGold);
+      theme.acc=mix(theme.acc,GOLD,heat);theme.sel=mix(theme.sel,[139,60,27],st.gold);
+      $('.xm-sky').style.opacity=st.gold;
+      $('.xm-track').style.transformOrigin='left center';
+      $('.xm-track').style.transform='scaleX('+(1+.008*tensionGold)+')';
+      win.style.setProperty('--acc', csv(theme.acc));
+      win.dataset.tier = st.index === LAST ? 'max' : st.index >= EXTREME ? 'x' : st.index >= ULTRA ? 'u' : 'base';
+      knob.style.transform = `translateX(${x}px)`;
+      const fillWidth = (W - 2) * clamp(p / 5);
+      fill.style.width = `${clamp(p / 5) * 100}%`;
+      fill.style.background = rgb(p <= HIGH ? mix(BLUE, INDIGO, clamp(p - 1)) : INDIGO);
+      const zoneU = st.tGate === ULTRA ? st.tension : 0, zoneX = st.tGate === EXTREME ? st.tension : 0;
+      const uLevel = p >= ULTRA ? 1 : Math.max(zoneU, st.eU), xLevel = clamp(Math.max(zoneX, st.eX));
+      if (uLevel > .001 || xLevel > .001) drawFx(uLevel, xLevel, fillWidth); else g.clearRect(0, 0, GW, TH);
+
+      slider.style.setProperty('--heat', csv(st.tGate === LAST ? GOLD : st.tGate === EXTREME ? JADE.acc : NEB.acc));
+      contact.style.opacity = st.tension;
+      contact.style.transform = `translateX(${x}px) scale(${0.6 + 0.5 * st.tension})`;
+      ahead.style.opacity = zoneX;
+      ahead.style.transform = `translateX(${x + 6}px)`;
+      outline.style.opacity = st.tension * 0.9;
+      const amp = st.tGate === LAST ? 1+1.5*tensionGold : st.tGate === EXTREME ? 1 : .5;
+      const jitter = () => (st.tension > .01 ? (Math.random() < .5 ? -amp : amp) : 0);
+      outline.style.transform = `translate(${jitter()}px, ${jitter()}px)`;
+
+      const breathing = st.index >= ULTRA && !st.dragging;
+      const b = 0.5 - 0.5 * Math.cos(2 * Math.PI * st.breath);
+      const pulse = breathing ? 0.3 + 0.7 * b : 0.75;
+      glow.style.opacity = st.eU; glowI.style.opacity = pulse;
+      boxGlow.style.opacity = st.eU; boxGlowI.style.opacity = pulse;
+      core.style.opacity = clamp(st.eX) * (breathing ? 0.7 + 0.3 * b : 1);
+      box.style.borderColor = rgb(mix(st.boxBase, theme.acc, st.eU));
+      box.style.setProperty('--tok-hide', 1 - st.eU);
+      box.style.setProperty('--tok-pos', `${driftN * 0.5}px`);
+      box.style.setProperty('--crys', Math.max(0, st.crys).toFixed(3));
+      box.style.setProperty('--crys-glow', (breathing ? b : .5).toFixed(3));
+      nameEl.style.color = rgb(mix(NAME, theme.name, st.eU));
+      paintButtons(rgb(st.index < HIGH ? SEL_BLUE : mix(SEL_HIGH, theme.sel, st.eU)));
+
+    }
+
+    const uAt = e => {
+      const rect = slider.getBoundingClientRect();
+      return clamp(((e.clientX - rect.left) / rect.width * W - START) / SEG, 0, 5);
+    };
+    slider.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      slider.setPointerCapture(e.pointerId);
+      slider.focus({ preventScroll: true });
+      Object.assign(st, { dragging: true, armed: true, springBack: null, mode: null });
+      handleMove(uAt(e), true);
+    });
+    slider.addEventListener('pointermove', e => { if (st.dragging) handleMove(uAt(e), false); });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type =>
+      slider.addEventListener(type, () => { if (st.dragging) release(); }));
+    slider.addEventListener('keydown', e => {
+      const next = { ArrowLeft: st.index - 1, ArrowRight: st.index + 1, Home: 0, End: LAST }[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      select(next);
+    });
+    buttons.forEach((button, i) => button.addEventListener('click', () => select(i)));
+
+    reset(0, false); nextStorm=now()+R(3000,5000);
+    if (window.pywebview && window.pywebview.api) bootstrap(); else window.addEventListener('pywebviewready', bootstrap, {once:true});
+
+    return { update, render, animated: () => animation.checked };
+  }
+
+  const dialogs = [...document.querySelectorAll('.xm-dialog')].map(createDialog);
+  let last = performance.now();
+  let raf=0;
+  function refresh(){
+    cancelAnimationFrame(raf);
+    document.querySelectorAll('.xm-bolts').forEach(node=>node.replaceChildren());
+    if(!document.hidden && dialogs.some(dialog => dialog.animated())) {
+      last=performance.now();raf=requestAnimationFrame(frame);
+    }
+  }
+  document.addEventListener('visibilitychange',refresh);
+  function frame(t) {
+    const dt = clamp(t - last, 0, 100);
+    last = t;
+    {
+      driftN += dt / 1000 * 16 / S();
+      driftA += dt / 1000 * 20 / S();
+      driftR += dt / 1000 * 30 / S();
+      twinkle += dt / S();
+    }
+    dialogs.filter(d => d.animated()).forEach(d => { d.update(t, dt); d.render(); });
+    raf=requestAnimationFrame(frame);
+  }
+  refresh();
+})();
+</script>
+</html>

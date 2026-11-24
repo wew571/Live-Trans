@@ -386,7 +386,7 @@ class _SetupWindow:
         self.can_continue = all(item.optional for item in result.missing)
         self.libraries.update(item for item in result.missing if item.category == "library")
         self.models.update(item for item in result.missing if item.category == "model" and not item.optional)
-        self.optional.update(item for item in result.missing if item.optional)
+        self.optional.update(item for item in result.missing if item.category == "model" and item.optional)
         if self.optional.entries:
             self.optional.frame.grid()
             if not self.log_panel.winfo_manager():

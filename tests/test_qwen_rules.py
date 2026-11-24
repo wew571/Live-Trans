@@ -30,7 +30,7 @@ def test_applied_snapshot_stays_the_same_until_settings_are_saved(tmp_path):
 
     assert OCRSettings.load(tmp_path).qwen_rule is None
     slot = save_rule_slot(tmp_path, name="One game", text="Use em.")
-    applied = replace(PRESETS["XHigh"], qwen_rule=slot)
+    applied = replace(PRESETS["Ultra"], qwen_rule=slot)
     applied.save(tmp_path)
     edited = save_rule_slot(tmp_path, slot_id=slot.id, name="One game", text="Use tôi.")
     assert OCRSettings.load(tmp_path) == applied

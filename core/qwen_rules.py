@@ -12,6 +12,22 @@ from uuid import uuid4
 _SLOT_ID = re.compile(r"[a-f0-9]{32}")
 
 
+def parse_crop_rule(text: str) -> tuple[str, str]:
+    """Separate the first-line crop role from the translation instructions."""
+    first, _, rest = text.strip().partition("\n")
+    key, separator, value = first.partition(":")
+    if separator and key.strip().casefold() in ("vai trò", "role"):
+        role = {
+            "tên người nói": "speaker",
+            "speaker": "speaker",
+            "lời thoại": "dialogue",
+            "dialogue": "dialogue",
+        }.get(value.strip().casefold())
+        if role is not None:
+            return role, rest.strip()
+    return "dialogue", text
+
+
 @dataclass(frozen=True)
 class QwenRule:
     id: str

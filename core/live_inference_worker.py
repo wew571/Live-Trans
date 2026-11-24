@@ -10,7 +10,10 @@ import sys
 
 from live_models import _is_translation_batch, read_packet, write_packet
 from live_translator import load_translator
-from core.ocr_settings import DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_PIVOT, QWEN_4B, QWEN_CONTEXT_DEFAULT, OCRSettings, ocr_model_key
+from core.ocr_settings import (
+    DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_PIVOT, QWEN_4B,
+    QWEN_BACKEND_CUDA_PYTHON, QWEN_BACKEND_VULKAN, QWEN_CONTEXT_DEFAULT, OCRSettings, ocr_model_key,
+)
 from core.setup_models import resolve_model
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -98,17 +101,27 @@ def _load_translation(request, resources):
         flow=request.get("flow", FLOW_PIVOT),
         qwen_context=request.get("qwen_context", QWEN_CONTEXT_DEFAULT),
         qwen_model=request.get("qwen_model", QWEN_4B),
+        qwen_backend=request.get("qwen_backend", QWEN_BACKEND_VULKAN),
     )
     if settings.flow != FLOW_DIRECT:
         return load_translator(settings.ja_model)
 
-    from core.live_qwen import QwenTranslator
-    from core.setup_models import qwen_model_path, qwen_server_path
+    from core.setup_models import qwen_model_path
 
-    translator = QwenTranslator(
-        qwen_model_path(_ROOT, settings.qwen_model), qwen_server_path(_ROOT), settings.qwen_context,
-        rules=request.get("qwen_rules", ""),
-    )
+    model_path = qwen_model_path(_ROOT, settings.qwen_model)
+    rules = request.get("qwen_rules", "")
+    if settings.qwen_backend == QWEN_BACKEND_CUDA_PYTHON:
+        from core.live_qwen_cuda import PythonCudaQwenTranslator
+        from core.setup_models import qwen_cuda_runtime_path
+
+        translator = PythonCudaQwenTranslator(
+            model_path, qwen_cuda_runtime_path(_ROOT), settings.qwen_context, rules=rules,
+        )
+    else:
+        from core.live_qwen import QwenTranslator
+        from core.setup_models import qwen_server_path
+
+        translator = QwenTranslator(model_path, qwen_server_path(_ROOT), settings.qwen_context, rules=rules)
     resources.callback(translator.close)
     return translator
 
@@ -118,6 +131,25 @@ def serve(input_stream, output_stream):
         _serve(input_stream, output_stream, resources)
 
 
+def _translate_with_context(translator, texts, context):
+    if not isinstance(context, dict) or len(texts) != 1:
+        raise ValueError("Contextual translation expects one input and a context object")
+    role, rules, speaker, history = (context.get(key) for key in ("role", "rules", "speaker", "history"))
+    if (
+        role not in ("speaker", "dialogue")
+        or not isinstance(rules, str)
+        or not isinstance(speaker, str)
+        or not isinstance(history, list)
+        or len(history) > 3
+        or any(
+            not isinstance(turn, list) or len(turn) != 3 or any(not isinstance(part, str) for part in turn)
+            for turn in history
+        )
+    ):
+        raise ValueError("Invalid live translation context")
+    return [translator.translate_contextual(texts[0], role=role, rules=rules, speaker=speaker, history=history)]
+
+
 def _serve(input_stream, output_stream, resources):
     ocr = None
     translator = None
@@ -125,6 +157,7 @@ def _serve(input_stream, output_stream, resources):
         request, binary = packet
         try:
             operation = request.get("op")
+            token_count = None
             if operation == "ocr":
                 frame = _decode_frame(request, binary)
                 if ocr is None:
@@ -136,12 +169,20 @@ def _serve(input_stream, output_stream, resources):
                     raise ValueError("Live translation expects a list of strings")
                 if translator is None:
                     translator = _load_translation(request, resources)
-                result = translator(texts)
+                context = request.get("context")
+                if context is not None and request.get("flow") == FLOW_DIRECT:
+                    result = _translate_with_context(translator, texts, context)
+                else:
+                    result = translator(texts)
                 if not _is_translation_batch(result, len(texts)):
                     raise ValueError("The live translator must return one string per input")
+                token_count = getattr(translator, "last_token_count", None)
             else:
                 raise ValueError("Unknown live inference request")
-            write_packet(output_stream, {"ok": True, "result": result})
+            reply = {"ok": True, "result": result}
+            if token_count is not None:
+                reply["token_count"] = token_count
+            write_packet(output_stream, reply)
         except BrokenPipeError:
             return
         except Exception as error:
