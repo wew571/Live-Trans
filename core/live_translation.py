@@ -77,6 +77,7 @@ class LiveUpdate:
     lines: tuple[TranslatedLine, ...]
     error: str | None = None
     token_count: int | None = None
+    request_id: int | None = None
 
 
 class _MssCapture:
@@ -178,10 +179,14 @@ class LiveTranslationSession:
         group_dialogue: bool = False,
         frame_crops: tuple[tuple[WindowCrop, str, str], ...] = (),
         history_turns: int = 0,
+        once_timeout: float = 5,
     ):
         if not isfinite(capture_fps) or capture_fps <= 0:
             raise ValueError('capture_fps must be finite and positive')
         self._interval = 1 / capture_fps
+        if not isfinite(once_timeout) or once_timeout <= 0:
+            raise ValueError('once_timeout must be finite and positive')
+        self._once_timeout = once_timeout
         self._model_factory = model_factory
         self._capture_factory = capture_factory if capture_factory is not None else _open_desktop
         self._frame_crop = frame_crop
@@ -193,6 +198,8 @@ class LiveTranslationSession:
         self._closed = False
         self._generation = 0
         self._region: Region | None = None
+        self._once_id: int | None = None
+        self._once_needs_frame = False
         self._last_captured: Frame | None = None
         self._pending_frame: Frame | None = None
         self._update: LiveUpdate | None = None
@@ -207,6 +214,18 @@ class LiveTranslationSession:
         with self._state:
             if not self._closed:
                 self._set_region(region)
+
+    def request_once(self, region: Region) -> int | None:
+        """Queue one frame and return its completion ID, or None if busy."""
+        if region[2] <= 0 or region[3] <= 0:
+            raise ValueError('Live translation needs a positive region width and height')
+        with self._state:
+            if self._closed or self._region is not None:
+                return None
+            self._set_region(region, reset_context=False)
+            self._once_id = self._generation
+            self._once_needs_frame = True
+            return self._once_id
 
     def move(self, region: Region) -> None:
         with self._state:
@@ -223,7 +242,7 @@ class LiveTranslationSession:
 
     def clear(self) -> None:
         with self._state:
-            if self._region is not None:
+            if self._region is not None and self._once_id is None:
                 self._generation += 1
                 self._pending_frame = None
                 self._update = LiveUpdate(self._region, ())
@@ -246,11 +265,14 @@ class LiveTranslationSession:
             # Close can interrupt a model subprocess while it is serving an inference request.
             Thread(target=self._close_models, args=(models,), name='live-model-close', daemon=False).start()
 
-    def _set_region(self, region: Region | None) -> None:
+    def _set_region(self, region: Region | None, *, reset_context=True) -> None:
         # All shared state changes here occur under the condition lock.
         self._generation += 1
-        self._context_revision += 1
+        if reset_context:
+            self._context_revision += 1
         self._region = region
+        self._once_id = None
+        self._once_needs_frame = False
         self._last_captured = None
         self._pending_frame = None
         self._update = None
@@ -259,33 +281,71 @@ class LiveTranslationSession:
     def _fail(self, generation: int, operation: str, error: Exception) -> None:
         with self._state:
             if generation == self._generation and self._region is not None:
-                region = self._region
-                self._set_region(None)
-                self._update = LiveUpdate(region, (), f'{operation}: {str(error) or type(error).__name__}')
+                update = LiveUpdate(
+                    self._region, (), f'{operation}: {str(error) or type(error).__name__}',
+                    request_id=self._once_id,
+                )
+                self._set_region(None, reset_context=self._once_id is None)
+                self._update = update
 
     def _capture(self) -> None:
         while True:
             with self._state:
-                self._state.wait_for(lambda: self._closed or self._region is not None)
+                self._state.wait_for(lambda: self._closed or (
+                    self._region is not None and (self._once_id is None or self._once_needs_frame)
+                ))
                 region = self._region
                 generation = self._generation
+                once = self._once_id is not None
                 if region is None:
                     return
             try:
                 with self._capture_factory() as capture:
-                    self._capture_frames(capture, region)
+                    if once:
+                        frame = self._capture_once(capture, region, generation)
+                    else:
+                        self._capture_frames(capture, region)
+                if once and frame is not None:
+                    with self._state:
+                        if generation == self._generation:
+                            self._once_needs_frame = False
+                            self._pending_frame = frame
+                            self._state.notify_all()
             except Exception as error:
                 self._fail(generation, 'Screen capture failed', error)
 
+    def _capture_crop_box(self, size):
+        if self._frame_crop and not (self._frame_crops or self._history_turns):
+            return self._frame_crop.box(*size)
+        return None
+
+    @staticmethod
+    def _crop_frame(frame, box):
+        left, top, right, bottom = box
+        return np.ascontiguousarray(frame[top:bottom, left:right])
+
+    def _capture_once(self, capture: _Capture, region: Region, generation: int) -> Frame | None:
+        timeout = perf_counter() + self._once_timeout
+        box = self._capture_crop_box(region[2:])
+        while True:
+            with self._state:
+                if generation != self._generation:
+                    return None
+            frame = capture.grab(region)
+            if frame is not None and frame.shape[:2] == (region[3], region[2]):
+                return self._crop_frame(frame, box) if box is not None else frame
+            remaining = timeout - perf_counter()
+            if remaining <= 0:
+                raise TimeoutError('Timed out waiting for a matching frame from the capture source.')
+            sleep(min(self._interval, remaining))
+
     def _capture_frames(self, capture: _Capture, region: Region) -> None:
         size = region[2:]
-        box = self._frame_crop.box(*size) if self._frame_crop and not (
-            self._frame_crops or self._history_turns
-        ) else None
+        box = self._capture_crop_box(size)
         while True:
             with self._state:
                 region = self._region
-                if region is None or region[2:] != size:
+                if region is None or region[2:] != size or self._once_id is not None:
                     return
                 generation = self._generation
                 previous = self._last_captured
@@ -294,8 +354,7 @@ class LiveTranslationSession:
             try:
                 frame = capture.grab(region)
                 if frame is not None and box is not None:
-                    left, top, right, bottom = box
-                    frame = np.ascontiguousarray(frame[top:bottom, left:right])
+                    frame = self._crop_frame(frame, box)
                 changed = frame is not None and (previous is None or not np.array_equal(previous, frame))
             except Exception as error:
                 self._fail(generation, 'Screen capture failed', error)
@@ -323,6 +382,7 @@ class LiveTranslationSession:
         last_frame = None
         last_generation = None
         last_token_count = None
+        previous_once = None
         while True:
             with self._state:
                 self._state.wait_for(lambda: self._closed or self._pending_frame is not None)
@@ -332,6 +392,8 @@ class LiveTranslationSession:
                 region = self._region
                 generation = self._generation
                 models = self._models
+                request_id = self._once_id
+                revision = self._context_revision
 
             if generation == last_generation and np.array_equal(last_frame, frame):
                 continue
@@ -352,18 +414,35 @@ class LiveTranslationSession:
 
                 if self._frame_crops or self._history_turns:
                     crops = self._frame_crops or ((self._frame_crop, "dialogue", ""),)
+                    once_key = revision, region[2:]
+                    if request_id is None or (previous_once and previous_once[0] != once_key):
+                        previous_once = None
+                    if request_id is not None:
+                        if context_revision != revision:
+                            history.clear()
+                            context_revision = revision
+                        # Only commit context from a completed, uncancelled request.
+                        round_history = history.copy()
+                    else:
+                        round_history = history
                     if generation != last_generation:
-                        region_lines = [()] * len(crops)
-                        previous_tiles = [None] * len(crops)
-                        speakers = [""] * len(crops)
-                        last_token_count = None
+                        if previous_once is not None:
+                            _, region_lines, previous_tiles, speakers, last_token_count = previous_once
+                            region_lines, previous_tiles, speakers = (
+                                region_lines.copy(), previous_tiles.copy(), speakers.copy()
+                            )
+                        else:
+                            region_lines = [()] * len(crops)
+                            previous_tiles = [None] * len(crops)
+                            speakers = [""] * len(crops)
+                            last_token_count = None
                     last_frame, last_generation = frame, generation
                     speaker = ""
                     for index, (crop, role, rules) in enumerate(crops):
                         with self._state:
                             if generation != self._generation:
                                 break
-                            if context_revision != self._context_revision:
+                            if request_id is None and context_revision != self._context_revision:
                                 history.clear()
                                 context_revision = self._context_revision
                         height, width = frame.shape[:2]
@@ -373,7 +452,7 @@ class LiveTranslationSession:
                         same_speaker = speakers[index] == incoming_speaker
                         if not same_speaker or not np.array_equal(previous_tiles[index], tile):
                             lines, tokens = self._translate_crop(
-                                models, tile, index, role, rules, incoming_speaker, history,
+                                models, tile, index, role, rules, incoming_speaker, round_history,
                                 region_lines[index] if same_speaker else (), (left, top), cache,
                             )
                             previous_tiles[index] = tile
@@ -384,29 +463,34 @@ class LiveTranslationSession:
                             with self._state:
                                 if generation != self._generation:
                                     break
-                                self._update = LiveUpdate(
-                                    self._region, tuple(line for rows in region_lines for line in rows),
-                                    token_count=last_token_count,
-                                )
+                                if request_id is None:
+                                    self._update = LiveUpdate(
+                                        self._region, tuple(line for rows in region_lines for line in rows),
+                                        token_count=last_token_count,
+                                    )
                         if role == "speaker":
                             speaker = " ".join(line.translation for line in region_lines[index])
-                    continue
-
-                detected = models.ocr(frame)
-                if self._frame_crop:
-                    left, top, _, _ = self._frame_crop.box(*region[2:])
-                    detected = [
-                        ((x1 + left, y1 + top, x2 + left, y2 + top), text)
-                        for (x1, y1, x2, y2), text in detected
-                    ]
-                with self._state:
-                    if generation != self._generation:
+                    if request_id is None:
                         continue
-                if self._group_dialogue:
-                    detected = _group_dialogue_lines(detected)
-                lines, token_count = self._translate(
-                    models, detected, cache, preserve_line_breaks=self._group_dialogue,
-                )
+                    lines = tuple(line for rows in region_lines for line in rows)
+                    token_count = last_token_count
+
+                else:
+                    detected = models.ocr(frame)
+                    if self._frame_crop:
+                        left, top, _, _ = self._frame_crop.box(*region[2:])
+                        detected = [
+                            ((x1 + left, y1 + top, x2 + left, y2 + top), text)
+                            for (x1, y1, x2, y2), text in detected
+                        ]
+                    with self._state:
+                        if generation != self._generation:
+                            continue
+                    if self._group_dialogue:
+                        detected = _group_dialogue_lines(detected)
+                    lines, token_count = self._translate(
+                        models, detected, cache, preserve_line_breaks=self._group_dialogue,
+                    )
             except Exception as error:
                 self._fail(generation, 'Live inference failed', error)
                 with self._state:
@@ -421,7 +505,13 @@ class LiveTranslationSession:
                     if token_count is not None or generation != last_generation:
                         last_token_count = token_count
                     last_frame, last_generation = frame, generation
-                    self._update = LiveUpdate(self._region, lines, token_count=last_token_count)
+                    update = LiveUpdate(self._region, lines, token_count=last_token_count, request_id=request_id)
+                    if request_id is not None:
+                        if (self._frame_crops or self._history_turns) and revision == self._context_revision:
+                            history = round_history
+                            previous_once = once_key, region_lines, previous_tiles, speakers, last_token_count
+                        self._set_region(None, reset_context=False)
+                    self._update = update
 
     def _translate_crop(self, models, tile, crop_index, role, rules, speaker, history, previous, offset, cache):
         detected = models.ocr(np.ascontiguousarray(tile))

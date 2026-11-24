@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
+import re
 from tempfile import NamedTemporaryFile
 
 from core.qwen_rules import QwenRule
@@ -34,7 +35,8 @@ QWEN_BACKEND_LABELS = {
     QWEN_BACKEND_CUDA_PYTHON: "llama-cpp-python CUDA",
 }
 CROP_COUNTS = (1, 2, 3)
-HISTORY_LENGTHS = (0, 2, 3)
+HISTORY_TURNS_MAX = 50
+DEFAULT_TRANSLATION_COLOR = "#f8fafc"
 _DEFAULT_CROP_RULE_SLOTS = ("",) * len(CROP_COUNTS)
 JA_MODEL_KEYS = {
     DEFAULT_JA_MODEL: "translate-ja-en",
@@ -61,6 +63,7 @@ class OCRSettings:
     history_turns: int = 2
     crop_rule_slots: tuple[str, ...] = _DEFAULT_CROP_RULE_SLOTS
     qwen_backend: str = QWEN_BACKEND_VULKAN
+    translation_color: str | None = None
 
     def __post_init__(self):
         if self.det not in OCR_SIZES or self.rec not in OCR_SIZES:
@@ -81,16 +84,19 @@ class OCRSettings:
             raise ValueError("Unknown settings interface.")
         if type(self.crop_count) is not int or self.crop_count not in CROP_COUNTS:
             raise ValueError("Choose one to three crop regions.")
-        if type(self.history_turns) is not int or self.history_turns not in HISTORY_LENGTHS:
-            raise ValueError("Choose zero, two or three previous dialogue turns.")
+        if not valid_history_turns(self.history_turns):
+            raise ValueError(f"Enter a whole number from 0 to {HISTORY_TURNS_MAX} for dialogue turns.")
         if self.crop_rule_slots != _crop_values(self.crop_rule_slots, _DEFAULT_CROP_RULE_SLOTS):
             raise ValueError("Invalid crop rule slots.")
         if not isinstance(self.qwen_backend, str) or self.qwen_backend not in QWEN_BACKEND_LABELS:
             raise ValueError("Unknown Qwen backend.")
+        if self.translation_color is not None and not _valid_translation_color(self.translation_color):
+            raise ValueError("Translation color must use #RRGGBB.")
 
     def same_pipeline_as(self, other: "OCRSettings") -> bool:
         return replace(
             self, animation_enabled=other.animation_enabled, settings_interface=other.settings_interface,
+            translation_color=other.translation_color,
         ) == other
 
     @property
@@ -130,6 +136,7 @@ class OCRSettings:
                 crop_count = values.get("crop_count")
                 history_turns = values.get("history_turns")
                 backend = values.get("qwen_backend")
+                color = values.get("translation_color")
                 if not isinstance(backend, str) or backend not in QWEN_BACKEND_LABELS:
                     backend = QWEN_BACKEND_VULKAN
                 return cls(
@@ -138,9 +145,10 @@ class OCRSettings:
                     animation_enabled=values.get("animation_enabled") is True,
                     settings_interface=interface if interface in _SETTINGS_INTERFACES else INTERFACE_MINIMAL,
                     crop_count=crop_count if type(crop_count) is int and crop_count in CROP_COUNTS else 1,
-                    history_turns=history_turns if type(history_turns) is int and history_turns in HISTORY_LENGTHS else 2,
+                    history_turns=history_turns if valid_history_turns(history_turns) else 2,
                     crop_rule_slots=_crop_values(values.get("crop_rule_slots"), _DEFAULT_CROP_RULE_SLOTS),
                     qwen_backend=backend,
+                    translation_color=color if _valid_translation_color(color) else None,
                 )
         except (OSError, ValueError, TypeError):
             pass
@@ -162,6 +170,14 @@ class OCRSettings:
 
 def _valid_context(context) -> bool:
     return type(context) is int and QWEN_CONTEXT_MIN <= context <= QWEN_CONTEXT_MAX
+
+
+def valid_history_turns(value) -> bool:
+    return type(value) is int and 0 <= value <= HISTORY_TURNS_MAX
+
+
+def _valid_translation_color(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value) is not None
 
 
 def _crop_values(values, defaults):

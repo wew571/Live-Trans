@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from math import cos, tau
 from time import monotonic
 from tkinter import StringVar
+from tkinter.colorchooser import askcolor
 
 import customtkinter as ctk
 from PIL import Image
@@ -12,8 +13,10 @@ from core.config import ASSETS_DIR
 from core.live_models import LiveModelError, check_qwen_cuda_worker
 from core.ocr_settings import (
     DEFAULT_JA_MODEL,
+    DEFAULT_TRANSLATION_COLOR,
     FLOW_DIRECT,
     FLOW_PIVOT,
+    HISTORY_TURNS_MAX,
     INTERFACE_ADVANCED,
     INTERFACE_MINIMAL,
     OCR_SIZES,
@@ -24,6 +27,7 @@ from core.ocr_settings import (
     QWEN_CONTEXT_MAX,
     QWEN_CONTEXT_MIN,
     QWEN_MODEL_LABELS,
+    valid_history_turns,
 )
 from core.setup_models import model_items
 from frontend.preset_slider import PresetSlider
@@ -66,7 +70,9 @@ _LABELS = {
     "VI": {
         "title": "Cài đặt Live Trans", "custom": "Tùy chỉnh", "advanced": "Nâng cao",
         "interface": "Giao diện", "minimal_interface": "Tối giản", "advanced_interface": "Nâng cao",
-        "crop_count": "Số vùng dịch", "history_turns": "Lượt thoại trong ngữ cảnh", "history_off": "Tắt",
+        "translation_color": "Màu chữ bản dịch", "choose_color": "Chọn màu", "default_color": "Mặc định",
+        "crop_count": "Số vùng dịch", "history_turns": "Lượt thoại trong ngữ cảnh (0 = Tắt)",
+        "invalid_history": f"Nhập số lượt thoại nguyên từ 0 đến {HISTORY_TURNS_MAX}.",
         "det": "Dò vùng chữ (det)", "rec": "Đọc nội dung (rec)", "flow": "Luồng dịch",
         "ja_model": "Mô hình Nhật → Anh", "context": "Context {model} (token)",
         "qwen_backend": "Backend Qwen",
@@ -85,7 +91,9 @@ _LABELS = {
     "EN": {
         "title": "Live Trans settings", "custom": "Custom", "advanced": "Advanced",
         "interface": "Interface", "minimal_interface": "Minimal", "advanced_interface": "Advanced",
-        "crop_count": "Translation regions", "history_turns": "Dialogue turns in context", "history_off": "Off",
+        "translation_color": "Translation text color", "choose_color": "Choose color", "default_color": "Default",
+        "crop_count": "Translation regions", "history_turns": "Dialogue turns in context (0 = Off)",
+        "invalid_history": f"Enter a whole number from 0 to {HISTORY_TURNS_MAX} for dialogue turns.",
         "det": "Find text regions (det)", "rec": "Read text (rec)", "flow": "Translation flow",
         "ja_model": "Japanese → English model", "context": "{model} context (tokens)",
         "qwen_backend": "Qwen backend",
@@ -139,7 +147,8 @@ def selection_status(root, settings, texts, *, original, saving=False):
     """Return the same validation message and severity for either settings window."""
     if settings is None:
         return texts["invalid_context"], "#f9e2af"
-    if settings == original or not settings.same_pipeline_as(original):
+    check_pipeline = settings == original or not settings.same_pipeline_as(original)
+    if check_pipeline:
         try:
             missing = [item.label for item in model_items(root, settings) if not item.is_ready()]
         except Exception as error:
@@ -147,7 +156,7 @@ def selection_status(root, settings, texts, *, original, saving=False):
         if missing:
             models = "\n".join(f"• {label}" for label in missing)
             return texts["missing"].format(models=models), "#f9e2af"
-    if saving and settings.flow == FLOW_DIRECT and settings.qwen_backend == QWEN_BACKEND_CUDA_PYTHON:
+    if saving and check_pipeline and settings.flow == FLOW_DIRECT and settings.qwen_backend == QWEN_BACKEND_CUDA_PYTHON:
         try:
             check_qwen_cuda_worker()
         except LiveModelError as error:
@@ -226,11 +235,28 @@ class OCRSettingsWindow(ctk.CTkToplevel):
         self.interface_menu.set(_label_for(self._interface_options, settings.settings_interface))
         self.interface_menu.pack(side="right")
 
+        color_row = ctk.CTkFrame(content, fg_color="transparent")
+        color_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(color_row, text=self._texts["translation_color"]).pack(side="left")
+        self.translation_color_reset = ctk.CTkButton(
+            color_row, width=68, text=self._texts["default_color"], command=self._reset_translation_color,
+        )
+        self.translation_color_reset.pack(side="right")
+        self.translation_color_button = ctk.CTkButton(
+            color_row, width=76, text=self._texts["choose_color"], command=self._choose_translation_color,
+        )
+        self.translation_color_button.pack(side="right", padx=6)
+        self._translation_color_swatch = ctk.CTkLabel(color_row, width=20, height=20, text="", corner_radius=4)
+        self._translation_color_swatch.pack(side="right")
+        self._set_translation_color(settings.translation_color)
+
         crop_row, self.crop_count_menu = self._numeric_row(content, "crop_count", settings.crop_count, (1, 2, 3))
         crop_row.pack(fill="x", pady=(0, 8))
-        self.history_row, self.history_menu = self._numeric_row(
-            content, "history_turns", settings.history_turns, (0, 2, 3),
-        )
+        self.history_row = ctk.CTkFrame(content, fg_color="transparent")
+        ctk.CTkLabel(self.history_row, text=self._texts["history_turns"]).pack(side="left")
+        self.history_entry = ctk.CTkEntry(self.history_row, width=136)
+        self.history_entry.insert(0, str(settings.history_turns))
+        self.history_entry.pack(side="right")
 
         self.animation_switch = ctk.CTkSwitch(content, text="Animation", command=self._update_selection)
         if settings.animation_enabled:
@@ -275,6 +301,7 @@ class OCRSettingsWindow(ctk.CTkToplevel):
         self.save_button = ctk.CTkButton(content, text=self._texts["save"], command=self._save)
         self.save_button.pack(fill="x")
         self.context_entry.bind("<KeyRelease>", self._update_selection)
+        self.history_entry.bind("<KeyRelease>", self._update_selection)
         self.bind("<Map>", self._map_appearance, add="+")
         self.bind("<Unmap>", self._unmap_appearance, add="+")
         self._update_selection()
@@ -296,7 +323,7 @@ class OCRSettingsWindow(ctk.CTkToplevel):
     def _numeric_row(self, parent, role, value, choices):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         ctk.CTkLabel(row, text=self._texts[role]).pack(side="left")
-        labels = [str(choice) if choice else self._texts["history_off"] for choice in choices]
+        labels = [str(choice) for choice in choices]
         menu = ctk.CTkOptionMenu(row, values=labels, width=136, command=self._update_selection)
         menu.set(labels[choices.index(value)])
         menu.pack(side="right")
@@ -432,8 +459,38 @@ class OCRSettingsWindow(ctk.CTkToplevel):
             arrow = "▾"
         self.advanced_button.configure(text=f"{arrow} {self._texts['advanced']}")
 
+    def _history_value(self):
+        try:
+            value = int(self.history_entry.get())
+        except ValueError:
+            return None
+        return value if valid_history_turns(value) else None
+
+    def _choose_translation_color(self):
+        _, color = askcolor(
+            color=self._translation_color or DEFAULT_TRANSLATION_COLOR,
+            parent=self, title=self._texts["translation_color"],
+        )
+        if color is not None:
+            self._set_translation_color(color)
+            self._update_selection()
+
+    def _set_translation_color(self, color):
+        self._translation_color = color
+        self._translation_color_swatch.configure(fg_color=color or DEFAULT_TRANSLATION_COLOR)
+        self.translation_color_reset.configure(state="normal" if color else "disabled")
+
+    def _reset_translation_color(self):
+        self._set_translation_color(None)
+        self._update_selection()
+
     def _selection(self):
         flow = self._flow_options[self.flow_menu.get()]
+        history = self._history_value()
+        if history is None:
+            if flow == FLOW_DIRECT:
+                return None
+            history = self._original.history_turns
         try:
             context = int(self.context_text.get())
         except ValueError:
@@ -442,7 +499,6 @@ class OCRSettingsWindow(ctk.CTkToplevel):
             if flow == FLOW_DIRECT:
                 return None
             context = self._original.qwen_context
-        history = self.history_menu.get()
         return replace(
             self._original, det=_OCR_OPTIONS[self.det_menu.get()], rec=_OCR_OPTIONS[self.rec_menu.get()],
             ja_model=_JA_OPTIONS[self.ja_menu.get()], flow=flow, qwen_context=context,
@@ -451,7 +507,8 @@ class OCRSettingsWindow(ctk.CTkToplevel):
             animation_enabled=bool(self.animation_switch.get()),
             settings_interface=self._interface(),
             crop_count=int(self.crop_count_menu.get()),
-            history_turns=0 if history == self._texts["history_off"] else int(history),
+            history_turns=history,
+            translation_color=self._translation_color,
         )
 
     def _interface(self):
@@ -511,6 +568,9 @@ class OCRSettingsWindow(ctk.CTkToplevel):
         self._check_selection(settings)
 
     def _check_selection(self, settings, *, saving=False):
+        if settings is None and self._history_value() is None:
+            self._show_status(self._texts["invalid_history"], "#f38ba8")
+            return False
         message, color = selection_status(
             self._root_path, settings, self._texts, original=self._original, saving=saving,
         )

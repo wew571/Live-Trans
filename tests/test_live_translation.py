@@ -16,7 +16,8 @@ OTHER_REGION = (50, 60, 4, 3)
 BOX = (1, 0, 4, 3)
 
 
-def test_ordered_crops_keep_speaker_and_recent_dialogue():
+@pytest.mark.parametrize("once", [False, True])
+def test_ordered_crops_keep_speaker_and_recent_dialogue(once):
     from contextlib import nullcontext
 
     from core.live_translation import WindowCrop
@@ -55,21 +56,27 @@ def test_ordered_crops_keep_speaker_and_recent_dialogue():
         group_dialogue=True, history_turns=2,
     )
 
-    def wait_translation(translation):
+    def wait_translation(translation, request_id=None):
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             update = session.poll()
-            if update and any(line.translation == translation for line in update.lines):
-                return update.lines
+            if update:
+                if once:
+                    assert request_id is not None and update.request_id == request_id
+                    assert [line.translation for line in update.lines] == ["Curren", translation]
+                    return update.lines
+                if any(line.translation == translation for line in update.lines):
+                    return update.lines
             time.sleep(.01)
         raise AssertionError(f"Missing translation: {translation}")
 
     try:
-        session.start(region)
-        result = wait_translation("VI First line")
+        if not once:
+            session.start(region)
+        result = wait_translation("VI First line", session.request_once(region) if once else None)
         assert [line.box for line in result] == [(0, 0, 4, 4), (4, 0, 8, 4)]
         capture.dialogue = 3
-        wait_translation("VI Next line")
+        wait_translation("VI Next line", session.request_once(region) if once else None)
         assert [source for source, _ in models.calls] == ["カレン", "First line", "Next line"]
         assert models.calls[-1][1] == {
             "role": "dialogue", "rules": "Dialogue", "speaker": "Curren",
@@ -77,7 +84,7 @@ def test_ordered_crops_keep_speaker_and_recent_dialogue():
         }
         session.clear_context()
         capture.dialogue = 4
-        wait_translation("VI New scene")
+        wait_translation("VI New scene", session.request_once(region) if once else None)
         assert models.calls[-1][1]["history"] == ()
         assert models.calls[-1][1]["speaker"] == "Curren"
     finally:
@@ -170,6 +177,73 @@ class LiveTranslationTests(unittest.TestCase):
                 return update
             time.sleep(0.005)
         self.fail('No live translation update arrived')
+
+    def test_once_captures_before_loading_and_reuses_model_between_clicks(self):
+        self.models.resume.clear()
+
+        def factory():
+            self.assertEqual(len(self.screen.timestamps), 1)
+            self.screen.show(3)
+            self.created.append(True)
+            return self.models
+
+        session = LiveTranslationSession(factory, capture_factory=self.screen.open)
+        self.addCleanup(session.close)
+        self.addCleanup(self.models.resume.set)
+        first_id = session.request_once(REGION)
+        self.assertIsNotNone(first_id)
+        self.assertTrue(self.models.entered.wait(3))
+        self.assertIsNone(session.request_once(REGION))
+        self.assertFalse(self.screen.wait_for_captures(3, 1))
+        self.models.resume.set()
+
+        self.session = session
+        first = self.wait_for_update()
+        self.assertEqual((first.request_id, first.lines[0].translation), (first_id, 'VI First line'))
+        second_id = session.request_once(REGION)
+        second = self.wait_for_update()
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual((second.request_id, second.lines[0].translation), (second_id, 'VI Third line'))
+        third_id = session.request_once(REGION)
+        third = self.wait_for_update()
+        self.assertEqual((third.request_id, third.lines), (third_id, second.lines))
+        self.assertEqual(len(self.screen.timestamps), 3)
+        self.assertEqual(self.created, [True])
+        self.assertEqual(self.models.batches, [['First line'], ['Third line']])
+
+    def test_once_times_out_waiting_for_window_frame_and_can_retry(self):
+        attempts = []
+        screen = self.screen
+
+        class Capture:
+            def grab(self, region):
+                attempts.append(region)
+                if ready and len(attempts) > first_attempt + 1:
+                    return screen.grab(region)
+                return None
+
+        @contextmanager
+        def open_capture():
+            yield Capture()
+
+        ready = False
+        self.session = LiveTranslationSession(
+            lambda: self.models, capture_factory=open_capture, once_timeout=.1,
+        )
+        self.addCleanup(self.session.close)
+        failed_id = self.session.request_once(REGION)
+        failed = self.wait_for_update()
+        self.assertEqual(failed.request_id, failed_id)
+        self.assertIn('Timed out', failed.error)
+        self.assertEqual(self.models.ocr_values, [])
+
+        first_attempt = len(attempts)
+        ready = True
+        retry_id = self.session.request_once(REGION)
+        retry = self.wait_for_update()
+        self.assertEqual(retry.request_id, retry_id)
+        self.assertIsNone(retry.error)
+        self.assertEqual(len(attempts), first_attempt + 2)
 
     def test_window_crop_limits_ocr_and_restores_window_relative_coordinates(self):
         region = (100, 200, 8, 6)
@@ -315,6 +389,16 @@ class LiveTranslationTests(unittest.TestCase):
         self.assertTrue(self.models.entered.wait(3))
         self.session.close()
         self.assertTrue(self.models.closed.wait(3))
+        self.assertIsNone(self.session.poll())
+
+    def test_close_cancels_inflight_once_request(self):
+        self.models.resume.clear()
+        self.assertIsNotNone(self.session.request_once(REGION))
+        self.assertTrue(self.models.entered.wait(3))
+        self.session.close()
+        self.assertTrue(self.models.closed.wait(3))
+        self.models.resume.set()
+        self.assertIsNone(self.session.request_once(REGION))
         self.assertIsNone(self.session.poll())
 
     def test_capture_is_capped_at_configured_frame_rate(self):

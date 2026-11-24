@@ -93,14 +93,14 @@ def test_multi_crop_settings_round_trip_and_preserve_pipeline_defaults(tmp_path)
     from core.ocr_settings import OCRSettings
 
     configured = OCRSettings(
-        crop_count=3, history_turns=0,
+        crop_count=3, history_turns=50,
         crop_rule_slots=("rule-id", "", ""),
     )
     configured.save(tmp_path)
     assert OCRSettings.load(tmp_path) == configured
     path = OCRSettings._path(tmp_path)
     stored = json.loads(path.read_text(encoding="utf-8"))
-    stored.update(crop_count=True, history_turns=1, crop_roles=["speaker", "dialogue", "dialogue"])
+    stored.update(crop_count=True, history_turns=51, crop_roles=["speaker", "dialogue", "dialogue"])
     path.write_text(json.dumps(stored), encoding="utf-8")
     restored = OCRSettings.load(tmp_path)
     assert (restored.crop_count, restored.history_turns) == (1, 2)
@@ -158,7 +158,7 @@ def test_worker_routes_both_languages_directly_to_qwen(monkeypatch, tmp_path, cl
                 assert role == "dialogue"
                 assert rules == "Giọng nhẹ nhàng."
                 assert speaker == "Curren Bouquetd'or"
-                assert history == [[speaker, "水やり", "Tưới nước."]]
+                assert history == [[speaker, f"水やり {{index}}", f"Tưới nước {{index}}."] for index in range(50)]
                 self.last_token_count = 245
                 return "Cho xin vài bông hồng nhé."
 
@@ -181,11 +181,17 @@ def test_worker_routes_both_languages_directly_to_qwen(monkeypatch, tmp_path, cl
             "Cài đặt", "Tiếp tục", "Dòng một và hai",
         ]
         assert client.last_token_count == 2255
+        history = tuple(("Curren Bouquetd'or", f"水やり {index}", f"Tưới nước {index}.") for index in range(50))
         assert client.translate_contextual(
             "バラを少しだけ", role="dialogue", rules="Giọng nhẹ nhàng.", speaker="Curren Bouquetd'or",
-            history=(("Curren Bouquetd'or", "水やり", "Tưới nước."),),
+            history=history,
         ) == "Cho xin vài bông hồng nhé."
         assert client.last_token_count == 245
+        with pytest.raises(live_models.LiveModelError, match="Invalid live translation context"):
+            client.translate_contextual(
+                "バラを少しだけ", role="dialogue", rules="Giọng nhẹ nhàng.", speaker="Curren Bouquetd'or",
+                history=(*history, history[0]),
+            )
     finally:
         client.close()
 

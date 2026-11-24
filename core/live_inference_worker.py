@@ -11,7 +11,7 @@ import sys
 from live_models import _is_translation_batch, read_packet, write_packet
 from live_translator import load_translator
 from core.ocr_settings import (
-    DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_PIVOT, QWEN_4B,
+    DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_PIVOT, HISTORY_TURNS_MAX, QWEN_4B,
     QWEN_BACKEND_CUDA_PYTHON, QWEN_BACKEND_VULKAN, QWEN_CONTEXT_DEFAULT, OCRSettings, ocr_model_key,
 )
 from core.setup_models import resolve_model
@@ -140,7 +140,7 @@ def _translate_with_context(translator, texts, context):
         or not isinstance(rules, str)
         or not isinstance(speaker, str)
         or not isinstance(history, list)
-        or len(history) > 3
+        or len(history) > HISTORY_TURNS_MAX
         or any(
             not isinstance(turn, list) or len(turn) != 3 or any(not isinstance(part, str) for part in turn)
             for turn in history

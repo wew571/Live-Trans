@@ -56,10 +56,14 @@ LANG_TEXTS = {
         "status_live_focus_window": "Chuyển sang cửa sổ nguồn để xem bản dịch",
         "status_pick_window": "Hãy chọn cửa sổ để dịch",
         "status_no_windows": "Không tìm thấy cửa sổ để dịch",
-        "status_restore_window": "Mở cửa sổ nguồn rồi bấm Bắt đầu",
+        "status_restore_window": "Mở lại cửa sổ nguồn rồi thử lại",
         "status_window_paused": "Đang chờ cửa sổ nguồn",
         "btn_live_start": " Bắt đầu (`)",
         "btn_live_stop": " Dừng (`)",
+        "live_capture_once": "Dịch một lần",
+        "status_once_busy": "Đang dịch…",
+        "status_once_empty": "Không tìm thấy chữ",
+        "status_once_resized": "Cửa sổ đã đổi kích thước. Bắt đầu dịch để chụp lại.",
         "btn_fullscreen": "Toàn màn hình",
         "status_live_waiting": "Đang nhận dạng văn bản…",
         "status_live_running": "Đang dịch trực tiếp",
@@ -93,10 +97,14 @@ LANG_TEXTS = {
         "status_live_focus_window": "Switch to the source window to see translations",
         "status_pick_window": "Choose a window to translate",
         "status_no_windows": "No windows available to translate",
-        "status_restore_window": "Restore the source window, then press Start",
+        "status_restore_window": "Restore the source window and try again",
         "status_window_paused": "Waiting for the source window",
         "btn_live_start": " Start (`)",
         "btn_live_stop": " Stop (`)",
+        "live_capture_once": "Translate once",
+        "status_once_busy": "Translating…",
+        "status_once_empty": "No text found",
+        "status_once_resized": "The window resized. Start translation to capture it again.",
         "btn_fullscreen": "Full screen",
         "status_live_waiting": "Looking for text…",
         "status_live_running": "Translating live",
@@ -235,6 +243,9 @@ class ControlPanel(ctk.CTk):
         self._live_session_crops = None
         self._live_overlay = None
         self._live_region = None
+        self._once_region = None
+        self._once_request_id = None
+        self._once_mode = False
         self._live_capture_mode = "desktop"
         self._live_window = None
         self._live_window_crop = None
@@ -336,11 +347,18 @@ class ControlPanel(ctk.CTk):
         )
 
     def _apply_ocr_settings(self, settings):
-        if not settings.same_pipeline_as(self._ocr_settings):
+        previous = self._ocr_settings
+        pipeline_changed = not settings.same_pipeline_as(previous)
+        if pipeline_changed:
             self._stop_live()
             self._close_live_session()
         self._ocr_settings = settings
-        self._sync_token_card()
+        if pipeline_changed:
+            self._sync_token_card()
+        if settings.translation_color != previous.translation_color:
+            self.history_box.tag_config("translation", foreground=settings.translation_color or "")
+            if self._live_overlay is not None:
+                self._live_overlay.set_translation_color(settings.translation_color)
         self._update_area_label()
 
     def _open_model_setup(self):
@@ -510,7 +528,6 @@ class ControlPanel(ctk.CTk):
             self.main_frame, command=self._on_live_capture_selected,
             font=ctk.CTkFont(family="Segoe UI", size=11), height=28,
         )
-
         self.live_capture_picker.pack(fill="x", pady=(0, 8))
 
         # Thẻ trạng thái & Tùy chọn nhanh
@@ -621,6 +638,7 @@ class ControlPanel(ctk.CTk):
             corner_radius=6
         )
         self.history_box.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        self.history_box.tag_config("translation", foreground=self._ocr_settings.translation_color or "")
         self.history_box.configure(state="disabled")
 
     def _sync_token_card(self):
@@ -687,7 +705,7 @@ class ControlPanel(ctk.CTk):
                 return
         was_live = self._live_region is not None
         dashboard_visible = self.state() == "normal"
-        if was_live and not preview:
+        if (was_live or self._once_region is not None) and not preview:
             self._stop_live()
         if dashboard_visible:
             self.withdraw()
@@ -698,6 +716,8 @@ class ControlPanel(ctk.CTk):
 
         def finish(region):
             self._picker = None
+            if self._closing:
+                return
             if not preview and region is not None:
                 selections.append((indices[len(selections)], region))
                 if len(selections) < len(indices):
@@ -727,7 +747,11 @@ class ControlPanel(ctk.CTk):
             prompt = texts["pick_area"]
             if count > 1:
                 prompt = f"Crop {indices[len(selections)] + 1} · {prompt}"
-            self._picker = RegionPicker(self, finish, prompt, texts["btn_cancel"], region=bounds)
+            try:
+                self._picker = RegionPicker(self, finish, prompt, texts["btn_cancel"], region=bounds)
+            except (OSError, RuntimeError, Win32Error) as error:
+                finish(None)
+                self._set_status("status_live_error", "#f38ba8", str(error))
 
         if preview:
             try:
@@ -735,7 +759,7 @@ class ControlPanel(ctk.CTk):
                     self, finish, "Vùng đang chọn" if self.current_lang == "VI" else "Selected regions",
                     "Đóng" if self.current_lang == "VI" else "Close", region=bounds,
                     preview=tuple((index + 1, crop) for index, crop in crop_preview),
-                    exclude_from_capture=was_live and target is None,
+                    exclude_from_capture=(was_live or self._once_request_id is not None) and target is None,
                 )
             except (OSError, RuntimeError, Win32Error) as error:
                 finish(None)
@@ -791,13 +815,21 @@ class ControlPanel(ctk.CTk):
 
     def _on_live_capture_selected(self, label):
         texts = LANG_TEXTS[self.current_lang]
-        self._set_live_capture_mode("window" if label == texts["live_capture_window"] else "desktop")
+        for mode in ("desktop", "window", "once"):
+            if label == texts[f"live_capture_{mode}"]:
+                self._set_live_capture_mode(mode)
+                return
 
     def _set_live_capture_mode(self, mode):
-        if self._live_region is not None or self._picker is not None or mode == self._live_capture_mode:
+        if self._live_region is not None or self._once_request_id is not None or self._picker is not None:
+            self._sync_capture_widgets()
             return
-        self._close_live_session()
-        self._live_capture_mode = mode
+        if mode != "once" and self._once_mode and self._once_region is not None:
+            self._stop_live()
+        self._once_mode = mode == "once"
+        if not self._once_mode and mode != self._live_capture_mode:
+            self._close_live_session()
+            self._live_capture_mode = mode
         self._sync_capture_widgets()
         self._update_area_label()
         self._set_status("status_ready", "#a6e3a1")
@@ -834,8 +866,9 @@ class ControlPanel(ctk.CTk):
         label_trans = LANG_TEXTS[self.current_lang]["history_trans"]
 
         self.history_box.insert("end", f"{label_orig}: {original.strip()}\n")
-        self.history_box.insert("end", f"{label_trans}: {translated.strip()}\n")
-        self.history_box.insert("end", "──────────────────────\n")
+        self.history_box.insert("end", f"{label_trans}: ")
+        self.history_box.insert("end", translated.strip(), "translation")
+        self.history_box.insert("end", "\n──────────────────────\n")
         self.history_box.see("end")
         self.history_box.configure(state="disabled")
 
@@ -845,7 +878,9 @@ class ControlPanel(ctk.CTk):
                 self.floating_widget = FloatingWidget(self)
             else:
                 self.floating_widget.deiconify()
-            if self._live_region is not None and self._live_capture_mode == "desktop":
+            if (self._live_region is not None or self._once_request_id is not None) and (
+                self._live_capture_mode == "desktop"
+            ):
                 try:
                     self._exclude_control(self.floating_widget)
                 except RuntimeError as error:
@@ -860,7 +895,9 @@ class ControlPanel(ctk.CTk):
             return
         if self.floating_widget:
             self.floating_widget.withdraw()
-        if self._live_region is not None and self._live_capture_mode == "desktop":
+        if (self._live_region is not None or self._once_request_id is not None) and (
+            self._live_capture_mode == "desktop"
+        ):
             try:
                 self._exclude_control(self)
             except RuntimeError as error:
@@ -1016,18 +1053,26 @@ class ControlPanel(ctk.CTk):
         if self._live_region is not None:
             self._stop_live()
             self._start_live()
+        elif self._once_region is not None:
+            self._stop_live()
+        elif self._live_session is not None and self._live_capture_mode == "desktop":
+            self._live_session.clear_context()
 
     def _sync_capture_widgets(self):
         texts = LANG_TEXTS[self.current_lang]
         active = self._live_region is not None
+        busy = self._once_request_id is not None
         window_mode = self._live_capture_mode == "window"
         self.live_capture_picker.configure(
-            values=[texts["live_capture_desktop"], texts["live_capture_window"]],
-            state="disabled" if active else "normal",
+            values=[texts[f"live_capture_{mode}"] for mode in ("desktop", "window", "once")],
+            state="disabled" if active or busy else "normal",
         )
-        self.live_capture_picker.set(texts[f"live_capture_{self._live_capture_mode}"])
+        mode = "once" if self._once_mode else self._live_capture_mode
+        self.live_capture_picker.set(texts[f"live_capture_{mode}"])
         if window_mode:
-            self.btn_pick_window.configure(text=texts["btn_pick_window"], state="disabled" if active else "normal")
+            self.btn_pick_window.configure(
+                text=texts["btn_pick_window"], state="disabled" if active or busy else "normal",
+            )
             if not self.btn_pick_window.winfo_manager():
                 self.btn_pick_window.pack(before=self.btn_area, pady=5, padx=15, fill="x")
         else:
@@ -1036,6 +1081,7 @@ class ControlPanel(ctk.CTk):
         self.btn_scan.configure(
             text=texts[label], fg_color="#f38ba8" if active else "#a6e3a1",
             hover_color="#eba0ac" if active else "#94e2d5",
+            state="disabled" if busy else "normal",
         )
         if self.floating_widget:
             self.floating_widget.show_live_activity(active)
@@ -1064,11 +1110,16 @@ class ControlPanel(ctk.CTk):
         if self._live_region is not None:
             self._live_session.clear()
             self._live_overlay.clear()
+        elif self._once_region is not None:
+            self._stop_live()
 
     def _start_live(self):
-        if self._live_region is not None or self._picker is not None:
+        if self._once_request_id is not None:
+            return
+        if self._closing or self._live_region is not None or self._picker is not None:
             self._set_monitor(self._live_region is not None)
             return
+        once = self._once_mode
         if self._ocr_settings.flow == FLOW_DIRECT:
             missing = [item.label for item in model_items(_ROOT, self._ocr_settings) if not item.is_ready()]
             if missing:
@@ -1093,8 +1144,14 @@ class ControlPanel(ctk.CTk):
             self._live_session_crops = crops
             if self._live_overlay is None:
                 self._live_overlay = self._live_overlay_factory(self)
+                self._live_overlay.set_translation_color(self._ocr_settings.translation_color)
             if window_mode:
-                region = self._live_window.bounds()
+                try:
+                    region = self._live_window.bounds()
+                except (OSError, RuntimeError, Win32Error):
+                    if once:
+                        self._select_live_window(None)
+                    raise
                 if region is None:
                     self._set_monitor(False)
                     self._set_status("status_restore_window", "#f9e2af")
@@ -1118,35 +1175,52 @@ class ControlPanel(ctk.CTk):
                     self._exclude_control(self.floating_widget)
                 if self._live_session is None:
                     self._live_session = self._live_session_factory()
-            self._live_session.start(region)
+            if once:
+                request_id = self._live_session.request_once(region)
+                if request_id is None:
+                    raise RuntimeError("The translation session is busy. Try again.")
+            else:
+                self._live_session.start(region)
         except Exception as error:
             self._abort_live(error)
             return
 
+        if once:
+            self._once_region = region
+            self._once_request_id = request_id
+            self._set_monitor(True)
+            self._sync_capture_widgets()
+            self._set_status("status_once_busy", "#f9e2af")
+            return
         self._live_region = region
         self._set_monitor(True)
         self._sync_capture_widgets()
         self._set_status("status_live_waiting" if overlay_visible else "status_live_focus_window", "#f9e2af")
 
     def _stop_live(self):
-        if self._live_session is not None and self._live_region is not None:
+        if self._live_session is not None and (self._live_region is not None or self._once_region is not None):
             self._live_session.stop()
         self._live_region = None
+        self._once_region = None
+        self._once_request_id = None
         self._live_window_paused = False
         self._last_live_pairs.clear()
         self._hide_token_tooltip()
         self._update_token_meter(0)
         if self._live_overlay is not None:
             self._live_overlay.hide()
+        self._restore_capture_controls()
+        self._set_monitor(False)
+        self._sync_capture_widgets()
+        self._set_status("status_ready", "#a6e3a1")
+
+    def _restore_capture_controls(self):
         for control in self._excluded_controls:
             try:
                 set_capture_exclusion(control, False)
             except (OSError, RuntimeError, Win32Error):
                 pass
         self._excluded_controls.clear()
-        self._set_monitor(False)
-        self._sync_capture_widgets()
-        self._set_status("status_ready", "#a6e3a1")
 
     def _exclude_control(self, control):
         if control in self._excluded_controls or control.state() != "normal":
@@ -1165,6 +1239,9 @@ class ControlPanel(ctk.CTk):
         self._set_status("status_live_error", "#f38ba8", str(error))
 
     def _poll_live(self):
+        if self._once_region is not None:
+            self._poll_live_once()
+            return
         if self._live_region is None:
             return
         overlay_visible = True
@@ -1184,18 +1261,72 @@ class ControlPanel(ctk.CTk):
                 else:
                     self._set_status("status_live_waiting", "#f9e2af")
         update = self._live_session.poll()
-        if update is None or update.region != self._live_region:
+        if update is None or getattr(update, "request_id", None) is not None or update.region != self._live_region:
             return
         if update.error:
             self._abort_live(update.error)
             return
 
+        self._render_live_update(update, update.region)
+        if overlay_visible:
+            self._set_status("status_live_running", "#a6e3a1")
+
+    def _poll_live_once(self):
+        region = self._once_region
+        if self._live_capture_mode == "window":
+            try:
+                bounds = self._live_window.bounds()
+            except (OSError, RuntimeError, Win32Error) as error:
+                self._select_live_window(None)
+                self._set_status("status_live_error", "#f38ba8", str(error))
+                return
+            if bounds is None:
+                if self._once_request_id is not None:
+                    self._stop_live()
+                    self._set_status("status_restore_window", "#f9e2af")
+                else:
+                    self._live_overlay.set_visible(False)
+                return
+            if bounds[2:] != region[2:]:
+                self._stop_live()
+                self._set_status("status_once_resized", "#f9e2af")
+                return
+            try:
+                if bounds != region:
+                    self._live_overlay.move(bounds)
+                    self._once_region = region = bounds
+                self._live_overlay.set_visible(self._live_window.is_foreground())
+            except (OSError, RuntimeError, Win32Error) as error:
+                self._abort_live(error)
+                return
+        if self._once_request_id is None:
+            return
+        update = self._live_session.poll()
+        if update is None or getattr(update, "request_id", None) != self._once_request_id:
+            return
+        self._once_request_id = None
+        self._restore_capture_controls()
+        self._set_monitor(False)
+        self._sync_capture_widgets()
+        if update.error:
+            self._once_region = None
+            self._last_live_pairs.clear()
+            self._live_overlay.hide()
+            self._set_status("status_live_error", "#f38ba8", str(update.error))
+            return
+        self._render_live_update(update, region)
+        if update.lines:
+            self._set_status("status_ready", "#a6e3a1")
+        else:
+            self._once_region = None
+            self._live_overlay.hide()
+            self._set_status("status_once_empty", "#f9e2af")
+
+    def _render_live_update(self, update, region):
         token_count = getattr(update, "token_count", None)
         if token_count is not None and token_count != self._token_count:
             self._update_token_meter(token_count)
-        self._live_overlay.render(update.region, update.lines)
-        if overlay_visible:
-            self._set_status("status_live_running", "#a6e3a1")
+        self._live_overlay.render(region, update.lines)
         pairs = set()
         for line in update.lines:
             pair = (line.source, line.translation)
@@ -1228,6 +1359,8 @@ class ControlPanel(ctk.CTk):
         return overlay_visible
 
     def _close_live_session(self):
+        if self._once_region is not None:
+            self._stop_live()
         if self._live_session is not None:
             self._live_session.close()
             self._live_session = None

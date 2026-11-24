@@ -6,6 +6,8 @@ import win32con
 import win32gui
 from win32api import GetSystemMetrics
 
+from core.ocr_settings import DEFAULT_TRANSLATION_COLOR
+
 
 _TRANSPARENT_COLOR = "#ff00ff"
 _SUBTITLE_BACKGROUND_OPACITY = 0.70
@@ -55,6 +57,19 @@ class LiveOverlay:
         self.background_window.attributes("-alpha", _SUBTITLE_BACKGROUND_OPACITY)
         self.window, self.canvas = self._create_layer(parent)
         self.region = None
+        self._translation_color = DEFAULT_TRANSLATION_COLOR
+
+    def set_translation_color(self, color):
+        color = (color or DEFAULT_TRANSLATION_COLOR).lower()
+        if color == self._translation_color:
+            return
+        self._translation_color = color
+        # Keep the chosen text color distinct from the foreground layer's transparency key.
+        transparent = "#00ff00" if color == _TRANSPARENT_COLOR else _TRANSPARENT_COLOR
+        self.window.attributes("-transparentcolor", transparent)
+        self.window.configure(background=transparent)
+        self.canvas.configure(background=transparent)
+        self.canvas.itemconfigure("all", fill=color)
 
     @staticmethod
     def _create_layer(parent):
@@ -136,7 +151,7 @@ class LiveOverlay:
         y = max(padding, top + padding)
         text = self.canvas.create_text(
             x, y, text=translation, anchor="nw", width=width,
-            font=("Segoe UI", -font_size), fill="#f8fafc",
+            font=("Segoe UI", -font_size), fill=self._translation_color,
         )
         text_x1, text_y1, text_x2, text_y2 = self.canvas.bbox(text)
         offset = max(0, text_y2 + padding - canvas_height)

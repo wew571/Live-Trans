@@ -204,6 +204,84 @@ def test_settings_ultra_saves_only_when_required_items_are_ready(panel, tmp_path
     assert dashboard._live_session is None
 
 
+def test_native_translation_color_updates_overlay_and_history(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+    from frontend.live_overlay import LiveOverlay
+
+    dashboard, session, _ = panel
+    saved_settings = OCRSettings()
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", saved_settings)
+    pick_color = Mock(return_value=((255, 0, 255), "#ff00ff"))
+    monkeypatch.setattr(ocr_settings_window, "askcolor", pick_color)
+    overlay = LiveOverlay(dashboard)
+    monkeypatch.setattr(dashboard, "_live_overlay", overlay)
+    dashboard._live_session = session
+    overlay.region = region = (0, 0, 320, 150)
+    lines = (SimpleNamespace(box=(10, 15, 170, 37), translation="Bản dịch"),)
+    overlay.render(region, lines)
+    item = overlay.canvas.find_all()[0]
+    dashboard.add_history_log("Source", "Bản dịch đã có")
+
+    def assert_history_color(color):
+        history = dashboard.history_box
+        assert history.tag_cget("translation", "foreground") == color
+        assert history.get(*history.tag_ranges("translation")[-2:]) == "Bản dịch đã có"
+
+    try:
+        dashboard.btn_settings.invoke()
+        dialog = dashboard._settings_window
+        dialog.translation_color_button.invoke()
+        pick_color.assert_called_once()
+        dialog.save_button.invoke()
+        assert OCRSettings.load(tmp_path).translation_color == "#ff00ff"
+        assert overlay.canvas.itemcget(item, "fill") == "#ff00ff"
+        assert str(overlay.window.attributes("-transparentcolor")).lower() == "#00ff00"
+        assert_history_color("#ff00ff")
+        session.close.assert_not_called()
+
+        dashboard.btn_settings.invoke()
+        dialog = dashboard._settings_window
+        dialog.translation_color_reset.invoke()
+        dialog.save_button.invoke()
+        assert OCRSettings.load(tmp_path).translation_color is None
+        assert overlay.canvas.itemcget(item, "fill") == "#f8fafc"
+        assert_history_color("")
+    finally:
+        if dashboard._settings_window is not None and dashboard._settings_window.winfo_exists():
+            dashboard._settings_window.destroy()
+        overlay.close()
+
+
+def test_native_settings_accept_typed_history_turns(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, _, _ = panel
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_: [])
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_ocr_settings", OCRSettings(flow="direct", history_turns=3))
+    dashboard.btn_settings.invoke()
+    dialog = dashboard._settings_window
+    try:
+        assert dialog.history_entry.get() == "3"
+        for invalid in ("", "51", "-1", "2.5"):
+            dialog.history_entry.delete(0, "end")
+            dialog.history_entry.insert(0, invalid)
+            dialog.save_button.invoke()
+            assert dialog.winfo_exists()
+            assert "0" in dialog.status.cget("text") and "50" in dialog.status.cget("text")
+        dialog.history_entry.delete(0, "end")
+        dialog.history_entry.insert(0, "50")
+        dialog.save_button.invoke()
+        assert not dialog.winfo_exists()
+        assert OCRSettings.load(tmp_path).history_turns == dashboard._ocr_settings.history_turns == 50
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()
+
+
 def test_native_advanced_qwen_backend_survives_preset_switches(panel, tmp_path, monkeypatch):
     from core.live_models import LiveModelError
     from core.ocr_settings import OCRSettings
@@ -853,6 +931,167 @@ def test_scan_button_toggles_the_same_live_session_as_monitor(panel):
     session.stop.assert_called_once()
     overlay.hide.assert_called()
     assert dashboard.auto_switch.get() == 0
+
+
+def test_translate_once_is_a_mode_and_scan_ignores_unrelated_updates(panel, monkeypatch):
+    from core.live_translation import LiveUpdate, TranslatedLine
+    from core.ocr_settings import OCRSettings
+
+    dashboard, session, overlay = panel
+    previous_settings = dashboard._ocr_settings
+    monkeypatch.setattr("frontend.ui.model_items", lambda *_args: ())
+    dashboard._apply_ocr_settings(OCRSettings(flow="direct", qwen_context=3000))
+    session.close.reset_mock()
+    session.request_once.side_effect = (11, 12)
+    try:
+        picker = dashboard.live_capture_picker
+        desktop, _, once = picker.cget("values")
+        picker.cget("command")(once)
+        assert picker.get() == once
+        assert dashboard._picker is None
+        session.start.assert_not_called()
+        session.request_once.assert_not_called()
+
+        dashboard.btn_scan.invoke()
+        region = dashboard.fullscreen_region()
+        session.request_once.assert_called_once_with(region)
+        assert dashboard.auto_switch.get() == 1
+        assert dashboard._status[0] == "status_once_busy"
+        assert dashboard.btn_scan.cget("state") == "disabled"
+        dashboard.trigger_scan()
+        session.request_once.assert_called_once()
+        line = TranslatedLine((0, 0, 30, 10), "First", "VI First")
+
+        for unrelated_id in (None, 10):
+            session.poll.return_value = LiveUpdate(region, (line,), request_id=unrelated_id)
+            dashboard._poll_live()
+        overlay.render.assert_not_called()
+
+        session.poll.return_value = LiveUpdate(region, (line,), token_count=2255, request_id=11)
+        dashboard._poll_live()
+        overlay.render.assert_called_once_with(region, (line,))
+        assert dashboard.btn_scan.cget("state") == "normal"
+        assert dashboard.auto_switch.get() == 0
+        assert dashboard.token_percent.cget("text") == "75%"
+        assert dashboard.token_tooltip.cget("text") == "2255/3000 token"
+        assert "VI First" in dashboard.history_box.get("1.0", "end")
+
+        dashboard.auto_switch.toggle()
+        assert session.request_once.call_count == 2
+        session.poll.return_value = LiveUpdate(region, (), request_id=12)
+        dashboard._poll_live()
+        overlay.render.assert_called_with(region, ())
+        session.close.assert_not_called()
+        assert dashboard._status[0] == "status_once_empty"
+        assert dashboard.btn_scan.cget("state") == "normal"
+        assert picker.get() == once
+        picker.cget("command")(desktop)
+        dashboard.btn_scan.invoke()
+        session.start.assert_called_once_with(region)
+    finally:
+        session.request_once.side_effect = None
+        dashboard._apply_ocr_settings(previous_settings)
+
+
+def test_translate_once_window_picker_and_retained_overlay(panel, monkeypatch):
+    from core.live_translation import LiveUpdate, TranslatedLine
+
+    dashboard, session, overlay = panel
+    target = Mock(title="Once Game", pid=123)
+    target.bounds.return_value = region = (10, 20, 200, 300)
+    target.is_foreground.return_value = True
+    monkeypatch.setattr(dashboard, "_live_window", None)
+    monkeypatch.setattr("frontend.ui.list_windows", lambda _pid: [target])
+    monkeypatch.setattr(dashboard, "_create_window_live_session", Mock(return_value=session))
+    dashboard._set_live_capture_mode("window")
+    session.request_once.return_value = 42
+
+    capture_picker = dashboard.live_capture_picker
+    capture_picker.cget("command")(capture_picker.cget("values")[2])
+    assert dashboard._picker is None
+    dashboard.btn_scan.invoke()
+    assert dashboard._status[0] == "status_pick_window"
+    assert dashboard._picker is None
+    dashboard.btn_pick_window.invoke()
+    picker = dashboard._picker
+    assert picker is not None
+    session.request_once.assert_not_called()
+    picker.tk.call(picker.protocol("WM_DELETE_WINDOW"))
+    assert dashboard._picker is None
+    dashboard.btn_pick_window.invoke()
+    picker = dashboard._picker
+
+    def descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from descendants(child)
+
+    next(widget for widget in descendants(picker) if isinstance(widget, type(dashboard.btn_scan))
+         and widget.cget("text") == "Once Game  [123]").invoke()
+    session.request_once.assert_not_called()
+    dashboard.btn_scan.invoke()
+    session.request_once.assert_called_once_with(region)
+    line = TranslatedLine((0, 0, 20, 10), "Game text", "VI Game text")
+    session.poll.return_value = LiveUpdate(region, (line,), request_id=42)
+    dashboard._poll_live()
+    overlay.render.assert_called_once_with(region, (line,))
+
+    target.is_foreground.return_value = False
+    target.bounds.return_value = (30, 40, 200, 300)
+    dashboard._poll_live()
+    overlay.move.assert_called_once_with((30, 40, 200, 300))
+    overlay.set_visible.assert_called_with(False)
+    target.is_foreground.return_value = True
+    dashboard._poll_live()
+    overlay.set_visible.assert_called_with(True)
+    session.start.assert_not_called()
+    session.request_once.assert_called_once()
+
+    target.bounds.return_value = (30, 40, 300, 300)
+    dashboard._poll_live()
+    overlay.hide.assert_called()
+    assert dashboard._once_region is None
+
+
+def test_translate_once_waits_for_regions_and_drops_result_after_settings_change(panel, monkeypatch):
+    from core.live_translation import LiveUpdate, TranslatedLine
+    from core.ocr_settings import OCRSettings
+
+    dashboard, session, overlay = panel
+    previous = dashboard._ocr_settings
+    picker = Mock()
+    monkeypatch.setattr("frontend.ui.RegionPicker", picker)
+    monkeypatch.setattr(dashboard, "_extra_crops", {"window": {}, "desktop": {}})
+    session.request_once.return_value = 21
+    try:
+        dashboard._apply_ocr_settings(OCRSettings(crop_count=2))
+        capture_picker = dashboard.live_capture_picker
+        capture_picker.cget("command")(capture_picker.cget("values")[2])
+        dashboard.btn_scan.invoke()
+        assert dashboard._picker is None
+        assert dashboard._status[0] == "status_live_error"
+        dashboard.btn_area.invoke()
+        picker.call_args.args[1](None)
+        session.request_once.assert_not_called()
+        dashboard.btn_area.invoke()
+        picker.call_args.args[1]((10, 20, 100, 100))
+        session.request_once.assert_not_called()
+        picker.call_args.args[1]((120, 20, 100, 100))
+        assert len(dashboard._crop_regions()) == 2
+        session.request_once.assert_not_called()
+        dashboard.btn_scan.invoke()
+        region = dashboard.fullscreen_region()
+        session.request_once.assert_called_once_with(region)
+        assert len(dashboard._live_session_crops) == 2
+        dashboard._apply_ocr_settings(OCRSettings())
+        session.close.assert_called()
+        line = TranslatedLine((0, 0, 25, 10), "Late text", "VI Late text")
+        session.poll.return_value = LiveUpdate(region, (line,), request_id=21)
+        dashboard._poll_live()
+        overlay.render.assert_not_called()
+        assert dashboard.btn_scan.cget("state") == "normal"
+    finally:
+        dashboard._apply_ocr_settings(previous)
 
 
 def test_recording_translates_selected_window_and_tracks_its_bounds(panel, monkeypatch):

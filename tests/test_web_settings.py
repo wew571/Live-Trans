@@ -8,7 +8,7 @@ from core.qwen_rules import QwenRule
 def _draft(settings):
     return {key: getattr(settings, key) for key in
             ("det", "rec", "ja_model", "flow", "qwen_model", "qwen_context", "qwen_backend", "animation_enabled",
-             "settings_interface", "crop_count", "history_turns")}
+             "settings_interface", "crop_count", "history_turns", "translation_color")}
 
 
 def _request(session, method, draft=None):
@@ -101,12 +101,37 @@ def test_web_settings_keep_crop_choices_across_presets(tmp_path, monkeypatch):
     assert _request(session, "bootstrap")["settings"]["crop_count"] == 2
     assert _request(session, "bootstrap")["settings"]["history_turns"] == 3
 
-    draft = _draft(PRESETS["Ultra"]) | {"crop_count": 3, "history_turns": 0}
-    assert not _request(session, "validate", draft | {"history_turns": 1})["ok"]
+    draft = _draft(PRESETS["Ultra"]) | {"crop_count": 3, "history_turns": 50}
+    for valid in (0, 1, 2, 3, 20, 49, 50):
+        assert _request(session, "validate", draft | {"history_turns": valid})["ok"]
+    for invalid in (None, -1, 51, 2.5, True):
+        result = _request(session, "save", draft | {"history_turns": invalid})
+        assert not result["ok"]
+        assert "0 to 50" in result["message"]
     assert _request(session, "save", draft)["ok"]
     saved = OCRSettings.load(tmp_path)
-    assert (saved.crop_count, saved.history_turns) == (3, 0)
+    assert (saved.crop_count, saved.history_turns) == (3, 50)
     assert saved.crop_rule_slots == original.crop_rule_slots
+
+
+def test_web_translation_color_round_trips_without_a_pipeline_change(tmp_path, monkeypatch):
+    from frontend import ocr_settings_window
+    from frontend.web_settings import WebSettingsSession
+
+    original = OCRSettings()
+    inventory = Mock(return_value=[])
+    monkeypatch.setattr(ocr_settings_window, "model_items", inventory)
+    session = WebSettingsSession(Mock(), tmp_path, original, "EN", Mock())
+    assert _request(session, "bootstrap")["settings"]["translation_color"] is None
+    draft = _draft(original)
+    assert not _request(session, "save", draft | {"translation_color": "blue"})["ok"]
+    assert _request(session, "save", draft | {"translation_color": "#66ccff"})["ok"]
+    saved = OCRSettings.load(tmp_path)
+    assert saved.translation_color == "#66ccff"
+    assert saved.same_pipeline_as(original)
+    inventory.assert_not_called()
+    assert _request(session, "save", draft | {"translation_color": None})["ok"]
+    assert OCRSettings.load(tmp_path).translation_color is None
 
 
 def test_web_selects_optional_cuda_without_changing_the_qwen_preset(tmp_path, monkeypatch):

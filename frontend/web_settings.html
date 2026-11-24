@@ -145,7 +145,9 @@ main { width: min(468px, 100%); margin: 18px auto; padding: 12px; }
 .animation-row[hidden] { display:none; }
 .interface-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 2px; margin-bottom:6px; }
 .interface-row[hidden] { display:none; }
-.interface-row select { flex:0 0 136px; padding:4px 8px; border:1px solid var(--edge); border-radius:6px; background:var(--control); color:#f2f3fa; font:inherit; }
+.interface-row select, .interface-row input { flex:0 0 136px; min-width:0; padding:4px 8px; border:1px solid var(--edge); border-radius:6px; background:var(--control); color:#f2f3fa; font:inherit; }
+.color-controls { display:flex; align-items:center; gap:6px; }
+.color-controls input[type="color"] { flex:0 0 auto; width:48px; height:28px; padding:2px 4px; cursor:pointer; }
 .animation-row input { appearance:none; display:grid; align-items:center; width:32px; height:18px; margin:0; padding:2px; border:1px solid #626477; border-radius:10px; background:#3a3a4b; cursor:pointer; }
 .animation-row input::before { content:""; width:12px; height:12px; border-radius:50%; background:white; }
 .animation-row input:checked { background:#216699; border-color:#6496bd; justify-items:end; }
@@ -356,11 +358,18 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
             <option value="advanced">Nâng cao</option>
           </select>
         </label>
+        <div class="interface-row">
+          <label for="translation-color" id="translation-color-label">Màu chữ bản dịch</label>
+          <div class="color-controls">
+            <input id="translation-color" type="color">
+            <button id="reset-translation-color" class="settings-action" type="button">Mặc định</button>
+          </div>
+        </div>
         <label class="interface-row"><span id="crop-count-label">Số vùng dịch</span>
           <select id="crop-count"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select>
         </label>
-        <label class="interface-row" id="history-row" hidden><span id="history-turns-label">Lượt thoại trong ngữ cảnh</span>
-          <select id="history-turns"><option value="0">Tắt</option><option value="2">2</option><option value="3">3</option></select>
+        <label class="interface-row" id="history-row" hidden><span id="history-turns-label">Lượt thoại trong ngữ cảnh (0 = Tắt)</span>
+          <input id="history-turns" type="number" min="0" step="1" required>
         </label>
         <label class="animation-row"><span>Animation</span><input id="animation-enabled" type="checkbox" role="switch"></label>
         <details class="advanced">
@@ -423,6 +432,8 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
     const animation = $('#animation-enabled');
     const settingsInterface = $('#settings-interface');
     const cropCount = $('#crop-count'), historyTurns = $('#history-turns');
+    const colorInput = $('#translation-color'), colorReset = $('#reset-translation-color');
+    let translationColor = null;
     let boot = null, ruleName = null, qwenModel = '4b', locked = false, busy = false, serial = 0;
     const hasQwen = () => flow.value === 'direct';
     const labels = {
@@ -434,7 +445,8 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       det:det.value, rec:rec.value, ja_model:jaModel.value, flow:flow.value, qwen_model:qwenModel,
       qwen_context:context.value, qwen_backend:backend.value,
       animation_enabled:animation.checked, settings_interface:settingsInterface.value,
-      crop_count:Number(cropCount.value), history_turns:Number(historyTurns.value)
+      crop_count:Number(cropCount.value), history_turns:historyTurns.value === '' ? null : historyTurns.valueAsNumber,
+      translation_color:translationColor
     });
     function match(d) { return boot.presets.find(p => p.det === d.det && p.rec === d.rec && p.flow === d.flow && (d.flow === 'direct' ? p.qwen_model === d.qwen_model : p.ja_model === d.ja_model)); }
     function routeIndex(d) { const i = boot.presets.findIndex(p => p.flow === d.flow && (d.flow === 'direct' ? p.qwen_model === d.qwen_model : p.ja_model === d.ja_model)); return i < 0 ? 0 : i; }
@@ -444,6 +456,8 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       $('.animation-row').hidden = settingsInterface.value === 'minimal';
       settingsInterface.disabled = animation.disabled = cropCount.disabled = historyTurns.disabled = busy;
       backend.disabled = busy;
+      colorInput.disabled = busy;
+      colorReset.disabled = busy || translationColor === null;
       $('#context-label').textContent = T === labels.EN ? `${boot.qwen_models[qwenModel]} context (tokens)` : `Context ${boot.qwen_models[qwenModel]} (token)`;
       $('#active-rule').textContent = ruleName || T.none; flow.disabled = locked || busy;
     }
@@ -462,7 +476,19 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       validate();
     }
     [det, rec, flow, jaModel].forEach(field => field.addEventListener('change', changed)); context.addEventListener('input', changed);
-    [cropCount, historyTurns, backend].forEach(field => field.addEventListener('change', validate));
+    historyTurns.addEventListener('input', validate);
+    [cropCount, backend].forEach(field => field.addEventListener('change', validate));
+    colorInput.addEventListener('input', () => {
+      translationColor = colorInput.value;
+      renderFields();
+      validate();
+    });
+    colorReset.addEventListener('click', () => {
+      translationColor = null;
+      colorInput.value = boot.default_translation_color;
+      renderFields();
+      validate();
+    });
     settingsInterface.addEventListener('change', () => { renderFields(); validate(); });
     function applyAnimation() {
       win.dataset.animation = animation.checked ? 'on' : 'off';
@@ -519,8 +545,12 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       settingsInterface.options[1].textContent = T.advanced;
       settingsInterface.value = s.settings_interface || 'advanced';
       $('#crop-count-label').textContent = data.crop_labels.count;
+      $('#translation-color-label').textContent = data.translation_color_labels.label;
+      colorReset.textContent = data.translation_color_labels.default;
+      translationColor = s.translation_color;
+      colorInput.value = translationColor || data.default_translation_color;
       $('#history-turns-label').textContent = data.crop_labels.history;
-      historyTurns.options[0].textContent = data.crop_labels.off;
+      historyTurns.max = data.history_turns_max;
       cropCount.value = s.crop_count;
       historyTurns.value = s.history_turns;
       animation.checked = s.animation_enabled === true;

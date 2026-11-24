@@ -5,11 +5,14 @@ from dataclasses import replace
 from pywintypes import error as Win32Error
 
 from core.ocr_settings import (
+    DEFAULT_TRANSLATION_COLOR,
     FLOW_PIVOT,
+    HISTORY_TURNS_MAX,
     PRESETS,
     QWEN_CONTEXT_MAX,
     QWEN_CONTEXT_MIN,
     QWEN_MODEL_LABELS,
+    valid_history_turns,
 )
 from frontend.ocr_settings_window import _LABELS, _PRESET_APPEARANCES, _backend_options, selection_status
 from frontend.qwen_rules_window import QwenRulesWindow
@@ -60,6 +63,7 @@ class WebSettingsSession:
                 "settings_interface": self._original.settings_interface,
                 "crop_count": self._original.crop_count,
                 "history_turns": self._original.history_turns,
+                "translation_color": self._original.translation_color,
                 "rule_name": self._rule_name(),
             },
             "presets": [{"name": name, **_preset_fields(preset)} for name, preset in PRESETS.items()],
@@ -69,8 +73,12 @@ class WebSettingsSession:
             "qwen_backend_hint": self._texts["backend_hint"],
             "crop_labels": {
                 "count": self._texts["crop_count"], "history": self._texts["history_turns"],
-                "off": self._texts["history_off"],
             },
+            "history_turns_max": HISTORY_TURNS_MAX,
+            "translation_color_labels": {
+                "label": self._texts["translation_color"], "default": self._texts["default_color"],
+            },
+            "default_translation_color": DEFAULT_TRANSLATION_COLOR,
             "context_min": QWEN_CONTEXT_MIN,
             "context_max": QWEN_CONTEXT_MAX,
         }
@@ -78,6 +86,11 @@ class WebSettingsSession:
     def _check(self, draft, *, save):
         try:
             flow = draft["flow"]
+            history = draft.get("history_turns", self._original.history_turns)
+            if not valid_history_turns(history):
+                if flow != FLOW_PIVOT:
+                    return {"ok": False, "message": self._texts["invalid_history"], "preset": None}
+                history = self._original.history_turns
             raw_context = draft["qwen_context"]
             try:
                 context = int(raw_context) if type(raw_context) in (int, str) else 0
@@ -94,7 +107,8 @@ class WebSettingsSession:
                 animation_enabled=draft.get("animation_enabled", self._original.animation_enabled),
                 settings_interface=draft.get("settings_interface", self._original.settings_interface),
                 crop_count=draft.get("crop_count", self._original.crop_count),
-                history_turns=draft.get("history_turns", self._original.history_turns),
+                history_turns=history,
+                translation_color=draft.get("translation_color", self._original.translation_color),
             )
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "message": self._texts["error"], "preset": None}
