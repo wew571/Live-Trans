@@ -49,7 +49,7 @@ Trong cửa sổ **Thiết lập Live Trans**:
 
 1. Ở mục **Thư viện Python**, bấm **Chọn tất cả** rồi **Cài thư viện đã chọn**. Chờ quá trình cài hoàn tất.
 2. Ở mục **Mô hình**, bấm **Chọn tất cả** rồi **Cài mô hình đã chọn**. Nhóm này gồm PP-OCRv6 Small (det và rec), Mitsua ElanMT và VinAI Translate v2.
-3. Mục **Mô hình bổ sung** cho phép cài PP-OCRv6 Medium det, PP-OCRv6 Medium rec, NLLB-200 Distilled 600M, các bản Qwen3.5 Q4_K_M (2B, 4B và 9B), Qwen3.8-27B Q4_K_M và runtime llama.cpp dùng chung. Sau khi các mục bắt buộc sẵn sàng, bấm **Tiếp tục** để mở ứng dụng. Bạn có thể mở lại **Thiết lập** từ màn hình chính.
+3. Mục **Mô hình bổ sung** cho phép cài PP-OCRv6 Medium det, PP-OCRv6 Medium rec, NLLB Custom ONNX, NLLB-200 Distilled 600M, các bản Qwen3.5 Q4_K_M (2B, 4B và 9B), Qwen3.8-27B Q4_K_M và runtime llama.cpp dùng chung. Sau khi các mục bắt buộc sẵn sàng, bấm **Tiếp tục** để mở ứng dụng. Bạn có thể mở lại **Thiết lập** từ màn hình chính.
 
 Những lần sau, mở PowerShell tại thư mục dự án và chạy lại `py -3.12 main.py`.
 
@@ -82,13 +82,13 @@ Ngữ cảnh mặc định giữ hai lượt thoại gần nhất, gồm tên ng
 Trong **Cài đặt**, chọn mức bằng thanh trượt.
 
 - **Flash** dùng OCR Small cho cả det và rec, Mitsua ElanMT và VinAI Translate v2.
-- **Medium** dùng OCR Medium det và Small rec, NLLB-200 Distilled 600M và VinAI Translate v2.
+- **Medium** dùng PP-OCRv6 Medium det và Small rec. NLLB Custom ONNX dịch trực tiếp Nhật → Việt, còn VinAI Translate v2 dịch Anh → Việt. Theo model card, NLLB Custom ONNX **chỉ dành cho mục đích nghiên cứu**. Tải **NLLB Custom ONNX** và **PP-OCRv6 Medium det** trong **Thiết lập** nếu chưa có. [Điều kiện sử dụng NLLB Custom ONNX](https://huggingface.co/belumind/nllb-trilingual-en-vi-ja-onnx#license)
 - **High** dùng OCR Medium cho cả det và rec, rồi dùng Qwen3.5-2B Q4_K_M để dịch trực tiếp cả tiếng Nhật lẫn tiếng Anh sang tiếng Việt.
 - **Ultra** dùng OCR Medium cho cả det và rec, rồi dùng Qwen3.5-4B Q4_K_M để dịch trực tiếp cả tiếng Nhật lẫn tiếng Anh sang tiếng Việt.
 - **Extreme** dùng OCR Medium cho det và rec, với Qwen3.5-9B Q4_K_M để dịch Nhật → Việt hoặc Anh → Việt.
 - **Ultimate** dùng OCR Medium cho det và rec, với Qwen3.8-27B Q4_K_M để dịch Nhật → Việt hoặc Anh → Việt.
 
-Mục **Nâng cao** cho phép chọn riêng det, rec và model Nhật → Anh. Trong **Flash** và **Medium**, luồng Nhật → Anh → Việt được cố định, còn đầu vào tiếng Anh đi thẳng tới VinAI. **High**, **Ultra**, **Extreme** và **Ultimate** dùng chung tùy chọn context từ **1.000 đến 25.000 token**, mặc định **3.000**, và cùng thư viện quy tắc. Context lớn hơn có thể cần thêm VRAM.
+Mục **Nâng cao** cho phép chọn riêng det, rec và model Nhật → Anh khi dùng luồng trung gian. **Flash** dịch Nhật → Anh → Việt, còn **Medium** dịch Nhật → Việt trực tiếp. Cả hai gửi đầu vào tiếng Anh thẳng tới VinAI. **High**, **Ultra**, **Extreme** và **Ultimate** dùng chung tùy chọn context từ **1.000 đến 25.000 token**, mặc định **3.000**, và cùng thư viện quy tắc. Context lớn hơn có thể cần thêm VRAM.
 
 Trong luồng Qwen, **Nâng cao → Backend Qwen** mặc định dùng **llama.cpp Vulkan**. Để thử **llama-cpp-python CUDA**, cài mục bổ sung **llama-cpp-python CUDA (Qwen)** trong **Thiết lập**, rồi chọn backend và bấm **Lưu**. Backend CUDA dùng lại model GGUF hiện có và cần GPU NVIDIA, PyTorch có thư viện CUDA 13 cùng đủ VRAM cho model và OCR.
 
@@ -118,8 +118,9 @@ Phụ đề tiếng Việt hiển thị trên lời thoại tiếng Nhật trong
 
 1. **PP-OCRv6** phát hiện vùng chữ và đọc nội dung trong ảnh. Mặc định dùng Small cho cả hai bước. [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
 2. **Mitsua ElanMT** hoặc **NLLB-200 Distilled 600M** dịch tiếng Nhật sang tiếng Anh. NLLB là lựa chọn bổ sung, tải khoảng 2,46 GB trọng số khi chưa có trong bộ nhớ đệm. Meta phát hành NLLB theo giấy phép **CC BY-NC 4.0** cho mục đích nghiên cứu. [Mitsua ElanMT](https://huggingface.co/Mitsua/elan-mt-bt-ja-en) · [NLLB-200 Distilled 600M](https://huggingface.co/facebook/nllb-200-distilled-600M)
-3. **VinAI Translate v2** dịch sang tiếng Việt từ văn bản tiếng Anh gốc hoặc từ kết quả Nhật → Anh của model đã chọn. [VinAI Translate v2 trên Hugging Face](https://huggingface.co/vinai/vinai-translate-en2vi-v2)
+3. **VinAI Translate v2** dịch sang tiếng Việt từ văn bản tiếng Anh gốc hoặc từ kết quả Nhật → Anh của model đã chọn. Trọng số model được phát hành theo giấy phép **AGPL-3.0**. [VinAI Translate v2 trên Hugging Face](https://huggingface.co/vinai/vinai-translate-en2vi-v2)
 4. **Qwen Q4_K_M** chạy cục bộ qua llama.cpp. App chỉ gửi text từ OCR và yêu cầu tắt thinking. Các tệp GGUF nằm trong `model/`, khoảng 1,31 GB cho 2B, 3,03 GB cho 4B, 5,68 GB cho 9B và 19,4 GB cho 27B. [2B của SoAIHQ](https://huggingface.co/SoAIHQ/Qwen3.5-2B-GGUF) · [4B của ggml-org](https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF) · [9B của Unsloth](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) · [27B của ggml-org](https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF)
+5. **NLLB Custom ONNX** dùng bản INT8 chạy trên CPU qua ONNX Runtime, tải khoảng 1,9 GB. Model card ghi chỉ dùng cho nghiên cứu. [NLLB Custom ONNX trên Hugging Face](https://huggingface.co/belumind/nllb-trilingual-en-vi-ja-onnx)
 
 Chữ nhỏ, phông cách điệu hoặc nền phức tạp có thể làm OCR đọc sai và ảnh hưởng đến bản dịch. Văn bản chỉ có chữ Hán có thể được nhận nhầm là tiếng Nhật. Tốc độ phụ thuộc vào phần cứng và vùng quét. Ứng dụng dùng GPU khi PyTorch nhận được CUDA tương thích.
 

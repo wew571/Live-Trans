@@ -219,6 +219,27 @@ def test_live_scan_uses_configured_dotenv_overlay(tmp_path, monkeypatch):
     assert not (root / "models").exists()
 
 
+def test_live_scan_checks_the_libraries_of_native_only_wheels(tmp_path, monkeypatch):
+    from core import setup_libraries as setup
+
+    monkeypatch.delenv("LIVE_PYTHONPATH", raising=False)
+    monkeypatch.delenv("MANGALENS_LIVE_PYTHON", raising=False)
+    root = _root(tmp_path, "", "nvidia-cublas-cu12==12.9.2.10")
+    runtime = root / "models" / "live-runtime"
+    library = runtime / "nvidia" / "cublas" / "bin" / "cublas64_12.dll"
+    library.parent.mkdir(parents=True)
+    library.touch()
+    dist = runtime / "nvidia_cublas_cu12-12.9.2.10.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Name: nvidia-cublas-cu12\nVersion: 12.9.2.10\n", encoding="utf-8")
+    (dist / "RECORD").write_text("nvidia/cublas/bin/cublas64_12.dll,,\n", encoding="utf-8")
+    item = _items(setup, root)["live:nvidia-cublas-cu12"]
+
+    assert item.is_ready()
+    library.unlink()
+    assert not item.is_ready()
+
+
 def test_live_worker_checks_the_alternate_interpreters_torch_pair(tmp_path, monkeypatch):
     from core import setup_libraries as setup
 

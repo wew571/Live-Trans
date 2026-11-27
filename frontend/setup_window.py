@@ -12,7 +12,7 @@ from time import monotonic
 from tkinter import ttk
 
 from core.config import APP_ICON_PATH, APP_NAME
-from core.setup_types import DownloadInterrupted, InstallationItem
+from core.setup_types import DownloadCertificateError, DownloadInterrupted, InstallationItem
 from frontend.windows_shell import set_process_app_id
 
 
@@ -362,7 +362,9 @@ class _SetupWindow:
     def _show_failure(self, item, error, *, checking=False):
         action = "kiểm tra" if checking else "cài đặt"
         self._set_status(f"Không thể {action} {item.label}.", self.percent, animate=False)
-        if isinstance(error, PermissionError):
+        if isinstance(error, DownloadCertificateError):
+            hint = "Không thể xác minh chứng chỉ HTTPS. Kiểm tra ngày giờ, chứng chỉ hệ thống và mục certifi trong Thư viện Python."
+        elif isinstance(error, PermissionError):
             hint = "Kiểm tra quyền truy cập thư mục cài đặt."
         elif isinstance(error, OSError) and error.errno == errno.ENOSPC:
             hint = "Giải phóng dung lượng ổ đĩa rồi thử lại."

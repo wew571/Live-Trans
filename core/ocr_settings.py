@@ -12,6 +12,8 @@ OCR_SIZES = ("small", "medium")
 DEFAULT_JA_MODEL = "mitsua"
 FLOW_PIVOT = "pivot"
 FLOW_DIRECT = "direct"
+FLOW_NLLB_VINAI = "nllb-vinai"
+_FLOWS = (FLOW_PIVOT, FLOW_DIRECT, FLOW_NLLB_VINAI)
 INTERFACE_MINIMAL = "minimal"
 INTERFACE_ADVANCED = "advanced"
 _SETTINGS_INTERFACES = (INTERFACE_MINIMAL, INTERFACE_ADVANCED)
@@ -36,6 +38,7 @@ QWEN_BACKEND_LABELS = {
 }
 CROP_COUNTS = (1, 2, 3)
 HISTORY_TURNS_MAX = 50
+POST_TRANSLATION_DELAY_MAX = 5000
 DEFAULT_TRANSLATION_COLOR = "#f8fafc"
 _DEFAULT_CROP_RULE_SLOTS = ("",) * len(CROP_COUNTS)
 JA_MODEL_KEYS = {
@@ -64,13 +67,14 @@ class OCRSettings:
     crop_rule_slots: tuple[str, ...] = _DEFAULT_CROP_RULE_SLOTS
     qwen_backend: str = QWEN_BACKEND_VULKAN
     translation_color: str | None = None
+    post_translation_delay_ms: int = 0
 
     def __post_init__(self):
         if self.det not in OCR_SIZES or self.rec not in OCR_SIZES:
             raise ValueError("PP-OCRv6 model size must be small or medium.")
         if not isinstance(self.ja_model, str) or self.ja_model not in JA_MODEL_KEYS:
             raise ValueError("Unknown Japanese translation model.")
-        if self.flow not in (FLOW_PIVOT, FLOW_DIRECT):
+        if self.flow not in _FLOWS:
             raise ValueError("Unknown live translation flow.")
         if not _valid_context(self.qwen_context):
             raise ValueError("Qwen context must be an integer from 1000 to 25000 tokens.")
@@ -90,13 +94,16 @@ class OCRSettings:
             raise ValueError("Invalid crop rule slots.")
         if not isinstance(self.qwen_backend, str) or self.qwen_backend not in QWEN_BACKEND_LABELS:
             raise ValueError("Unknown Qwen backend.")
+        if not valid_post_translation_delay(self.post_translation_delay_ms):
+            raise ValueError("Post-translation delay must be an integer from 0 to 5000 ms.")
         if self.translation_color is not None and not _valid_translation_color(self.translation_color):
             raise ValueError("Translation color must use #RRGGBB.")
 
     def same_pipeline_as(self, other: "OCRSettings") -> bool:
         return replace(
             self, animation_enabled=other.animation_enabled, settings_interface=other.settings_interface,
-            translation_color=other.translation_color,
+            translation_color=other.translation_color, post_translation_delay_ms=other.post_translation_delay_ms,
+            crop_count=other.crop_count, history_turns=other.history_turns, qwen_context=other.qwen_context,
         ) == other
 
     @property
@@ -106,7 +113,7 @@ class OCRSettings:
             if (self.det, self.rec, self.flow) != (preset.det, preset.rec, preset.flow):
                 continue
             preset_model = preset.qwen_model if preset.flow == FLOW_DIRECT else preset.ja_model
-            if model == preset_model:
+            if self.flow == FLOW_NLLB_VINAI or model == preset_model:
                 return name
         return None
 
@@ -123,7 +130,7 @@ class OCRSettings:
                 if not isinstance(ja_model, str) or ja_model not in JA_MODEL_KEYS:
                     ja_model = DEFAULT_JA_MODEL
                 flow = values.get("flow")
-                if flow not in (FLOW_PIVOT, FLOW_DIRECT):
+                if flow not in _FLOWS:
                     flow = FLOW_PIVOT
                 context = values.get("qwen_context")
                 if not _valid_context(context):
@@ -137,6 +144,7 @@ class OCRSettings:
                 history_turns = values.get("history_turns")
                 backend = values.get("qwen_backend")
                 color = values.get("translation_color")
+                delay = values.get("post_translation_delay_ms")
                 if not isinstance(backend, str) or backend not in QWEN_BACKEND_LABELS:
                     backend = QWEN_BACKEND_VULKAN
                 return cls(
@@ -149,6 +157,7 @@ class OCRSettings:
                     crop_rule_slots=_crop_values(values.get("crop_rule_slots"), _DEFAULT_CROP_RULE_SLOTS),
                     qwen_backend=backend,
                     translation_color=color if _valid_translation_color(color) else None,
+                    post_translation_delay_ms=delay if valid_post_translation_delay(delay) else 0,
                 )
         except (OSError, ValueError, TypeError):
             pass
@@ -172,6 +181,10 @@ def _valid_context(context) -> bool:
     return type(context) is int and QWEN_CONTEXT_MIN <= context <= QWEN_CONTEXT_MAX
 
 
+def valid_post_translation_delay(value) -> bool:
+    return type(value) is int and 0 <= value <= POST_TRANSLATION_DELAY_MAX
+
+
 def valid_history_turns(value) -> bool:
     return type(value) is int and 0 <= value <= HISTORY_TURNS_MAX
 
@@ -191,7 +204,7 @@ def _crop_values(values, defaults):
 
 PRESETS = {
     "Flash": OCRSettings(),
-    "Medium": OCRSettings(det="medium", rec="small", ja_model="nllb"),
+    "Medium": OCRSettings(det="medium", rec="small", flow=FLOW_NLLB_VINAI),
     "High": OCRSettings("medium", "medium", flow=FLOW_DIRECT, qwen_model=QWEN_2B),
     "Ultra": OCRSettings("medium", "medium", flow=FLOW_DIRECT),
     "Extreme": OCRSettings("medium", "medium", flow=FLOW_DIRECT, qwen_model=QWEN_9B),

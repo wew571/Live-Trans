@@ -13,7 +13,7 @@ import sys
 from threading import Lock, Thread
 from typing import TYPE_CHECKING
 
-from core.ocr_settings import FLOW_DIRECT, OCRSettings
+from core.ocr_settings import FLOW_DIRECT, FLOW_NLLB_VINAI, OCRSettings
 
 if TYPE_CHECKING:
     import numpy as np
@@ -174,6 +174,8 @@ class LiveModelClient:
                     raise LiveModelError("Live model client is closed")
                 return []
         metadata = {"op": "translate", "texts": texts, "ja_model": self._ocr_settings.ja_model}
+        if self._ocr_settings.flow == FLOW_NLLB_VINAI:
+            metadata["flow"] = FLOW_NLLB_VINAI
         if self._ocr_settings.flow == FLOW_DIRECT:
             metadata.update(
                 flow=FLOW_DIRECT, qwen_context=self._ocr_settings.qwen_context,

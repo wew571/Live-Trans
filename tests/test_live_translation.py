@@ -470,7 +470,7 @@ class DialogueFeed(Screen):
             if update is not None:
                 assert update.error is None
                 if update.region == region and tuple(line.source for line in update.lines) == expected:
-                    return
+                    return update
             time.sleep(.005)
         raise AssertionError(f"Missing update for {text!r} at {region}")
 
@@ -564,4 +564,543 @@ def test_move_publishes_in_flight_translation_at_new_position():
         assert feed.calls == [("How was your day?", ())]
     finally:
         finish.set()
+        session.close()
+
+def test_live_delay_starts_after_render_ack_and_keeps_latest_frame():
+    screen, models = Screen(), Models()
+    session = LiveTranslationSession(lambda: models, capture_factory=screen.open, post_translation_delay_ms=150)
+    try:
+        session.start(REGION)
+        deadline = time.monotonic() + 3
+        update = None
+        while update is None and time.monotonic() < deadline:
+            update = session.poll()
+            time.sleep(.005)
+        assert update and update.render_id is not None
+        screen.show(2)
+        assert screen.wait_for_captures(2)
+        time.sleep(.2)
+        assert models.ocr_values == [1]
+        session.acknowledge_render(update.render_id)
+        screen.show(3)
+        assert screen.wait_for_captures(3)
+        time.sleep(.05)
+        assert models.ocr_values == [1]
+        deadline = time.monotonic() + 3
+        while len(models.ocr_values) < 2 and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert models.ocr_values == [1, 3]
+    finally:
+        session.close()
+
+
+def test_configure_live_cancels_gate_and_reuses_models():
+    screen, models = Screen(), Models()
+    created = []
+    def factory():
+        created.append(True)
+        return models
+    session = LiveTranslationSession(factory, capture_factory=screen.open, post_translation_delay_ms=1000)
+    try:
+        session.start(REGION)
+        deadline = time.monotonic() + 3
+        update = None
+        while update is None and time.monotonic() < deadline:
+            update = session.poll()
+            time.sleep(.005)
+        assert update and update.render_id is not None
+        screen.show(3)
+        assert screen.wait_for_captures(3)
+        session.configure_live(frame_crop=None, frame_crops=(), history_turns=0, post_translation_delay_ms=0)
+        deadline = time.monotonic() + 3
+        while len(models.ocr_values) < 2 and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert len(models.ocr_values) >= 2
+        assert created == [True]
+    finally:
+        session.close()
+
+def test_multicrop_delay_arms_only_after_final_crop():
+    from core.live_translation import WindowCrop
+    screen, models = Screen(), Models()
+    session = LiveTranslationSession(
+        lambda: models, capture_factory=screen.open, post_translation_delay_ms=100,
+        frame_crops=((WindowCrop(0, 0, .5, 1), 'dialogue', ''),
+                     (WindowCrop(.5, 0, 1, 1), 'dialogue', '')),
+    )
+    try:
+        session.start(REGION)
+        deadline = time.monotonic() + 3
+        update = None
+        while update is None and time.monotonic() < deadline:
+            update = session.poll()
+            time.sleep(.005)
+        assert update and len(update.lines) == 2 and update.render_id is not None
+        assert models.ocr_values == [1, 1]
+        screen.show(3)
+        assert screen.wait_for_captures(3)
+        time.sleep(.15)
+        assert models.ocr_values == [1, 1]
+        session.acknowledge_render(update.render_id)
+        deadline = time.monotonic() + 3
+        while len(models.ocr_values) < 4 and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert models.ocr_values == [1, 1, 3, 3]
+    finally:
+        session.close()
+
+def test_configure_history_truncates_and_crop_change_clears_context():
+    from core.live_translation import WindowCrop
+    screen = Screen()
+    class ContextModels(Models):
+        def __init__(self):
+            super().__init__()
+            self.contexts = []
+        def translate_contextual(self, text, **context):
+            self.contexts.append(context['history'])
+            return 'VI ' + text
+    models = ContextModels()
+    session = LiveTranslationSession(lambda: models, capture_factory=screen.open, group_dialogue=True, history_turns=2)
+    def once(value):
+        screen.show(value)
+        request = session.request_once(REGION)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update and update.request_id == request:
+                return
+            time.sleep(.005)
+        raise AssertionError('one-shot did not complete')
+    try:
+        models.text.update({2: 'Second line', 4: 'Fourth line'})
+        once(1)
+        once(2)
+        session.configure_live(frame_crop=None, frame_crops=(), history_turns=1, post_translation_delay_ms=0)
+        once(3)
+        assert models.contexts[-1] == (('', 'Second line', 'VI Second line'),)
+        session.configure_live(frame_crop=WindowCrop(0, 0, .5, 1), frame_crops=(), history_turns=1, post_translation_delay_ms=0)
+        once(4)
+        assert models.contexts[-1] == ()
+    finally:
+        session.close()
+
+def test_hot_history_change_and_context_preserving_resume_do_not_duplicate_dialogue():
+    screen = Screen()
+    class ContextModels(Models):
+        def __init__(self):
+            super().__init__()
+            self.contexts = []
+        def translate_contextual(self, text, **context):
+            self.contexts.append((text, context['history']))
+            return 'VI ' + text
+    models = ContextModels()
+    models.text.update({2: 'Second line', 3: 'Third line'})
+    session = LiveTranslationSession(lambda: models, capture_factory=screen.open, group_dialogue=True, history_turns=2)
+    def wait_update(text):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update and any(line.source == text for line in update.lines):
+                return update
+            time.sleep(.005)
+        raise AssertionError('missing ' + text)
+    try:
+        session.start(REGION)
+        wait_update('First line')
+        screen.show(2)
+        wait_update('Second line')
+        session.configure_live(frame_crop=None, frame_crops=(), history_turns=1, post_translation_delay_ms=0)
+        wait_update('Second line')
+        session.stop(reset_context=False)
+        session.start(REGION, reset_context=False)
+        wait_update('Second line')
+        screen.show(3)
+        wait_update('Third line')
+        assert models.contexts == [
+            ('First line', ()),
+            ('Second line', (('', 'First line', 'VI First line'),)),
+            ('Third line', (('', 'Second line', 'VI Second line'),)),
+        ]
+    finally:
+        session.close()
+
+
+def test_duplicate_render_ack_does_not_extend_delay():
+    screen, models = Screen(), Models()
+    session = LiveTranslationSession(lambda: models, capture_factory=screen.open, post_translation_delay_ms=300)
+    try:
+        session.start(REGION)
+        deadline = time.monotonic() + 3
+        update = None
+        while update is None and time.monotonic() < deadline:
+            update = session.poll()
+            time.sleep(.005)
+        assert update and update.render_id is not None
+        screen.show(3)
+        assert screen.wait_for_captures(3)
+        session.acknowledge_render(update.render_id)
+        time.sleep(.22)
+        session.acknowledge_render(update.render_id)
+        deadline = time.monotonic() + .2
+        while len(models.ocr_values) < 2 and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert models.ocr_values == [1, 3]
+    finally:
+        session.close()
+
+@pytest.mark.parametrize('history,delay', [(0, 100), (2, 0)])
+def test_configure_preserves_completed_unpolled_once(history, delay):
+    screen, models = Screen(), Models()
+    session = LiveTranslationSession(lambda: models, capture_factory=screen.open)
+    try:
+        request = session.request_once(REGION)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with session._state:
+                ready = session._update is not None
+            if ready:
+                break
+            time.sleep(.005)
+        assert ready
+        session.configure_live(frame_crop=None, frame_crops=(), history_turns=history, post_translation_delay_ms=delay)
+        update = session.poll()
+        assert update is not None and update.request_id == request
+    finally:
+        session.close()
+
+@pytest.mark.parametrize(("initial_history", "saved_history"), [(2, 1), (0, 1), (2, 0)])
+def test_saving_history_reprocesses_the_original_one_shot_frame(initial_history, saved_history):
+    class SplitScreen(Screen):
+        def grab(self, region):
+            frame = super().grab(region)
+            frame[:, :2] = 9
+            return frame
+
+    class ContextModels(Models):
+        def translate(self, texts):
+            return ['VI without history: ' + text for text in texts]
+
+        def translate_contextual(self, text, **context):
+            return 'VI with history: ' + text
+
+    screen, models = SplitScreen(), ContextModels()
+    crop = live_translation.WindowCrop(.5, 0, 1, 1)
+    session = LiveTranslationSession(
+        lambda: models, capture_factory=screen.open, frame_crop=crop,
+        group_dialogue=True, history_turns=initial_history,
+    )
+    models.resume.clear()
+    try:
+        request = session.request_once(REGION)
+        assert request is not None and models.entered.wait(3)
+        screen.show(3)
+        session.configure_live(
+            frame_crop=crop, frame_crops=(), history_turns=saved_history, post_translation_delay_ms=0,
+        )
+        models.resume.set()
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update is not None:
+                assert update.error is None and update.request_id == request
+                assert [line.source for line in update.lines] == ['First line']
+                mode = 'with history' if saved_history else 'without history'
+                assert [line.translation for line in update.lines] == [f'VI {mode}: First line']
+                assert models.ocr_values == [1, 1]
+                assert len(screen.timestamps) == 1
+                return
+            time.sleep(.005)
+        raise AssertionError('one-shot did not complete')
+    finally:
+        models.resume.set()
+        session.close()
+
+
+def test_saving_history_does_not_discard_a_one_shot_capture_in_progress():
+    captured, release = threading.Event(), threading.Event()
+
+    class BlockingScreen(Screen):
+        def grab(self, region):
+            frame = super().grab(region)
+            captured.set()
+            assert release.wait(3)
+            return frame
+
+    screen, models = BlockingScreen(), Models()
+    session = LiveTranslationSession(
+        lambda: models, capture_factory=screen.open, history_turns=2,
+    )
+    try:
+        request = session.request_once(REGION)
+        assert request is not None and captured.wait(3)
+        screen.show(3)
+        session.configure_live(
+            frame_crop=None, frame_crops=(), history_turns=1, post_translation_delay_ms=0,
+        )
+        release.set()
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update is not None:
+                assert update.error is None and update.request_id == request
+                assert [line.source for line in update.lines] == ['First line']
+                assert models.ocr_values == [1]
+                assert len(screen.timestamps) == 1
+                return
+            time.sleep(.005)
+        raise AssertionError('one-shot did not complete')
+    finally:
+        release.set()
+        session.close()
+
+
+def test_clear_stays_hidden_after_hot_configuration_on_unchanged_frame():
+    screen = Screen()
+    class ContextModels(Models):
+        def translate_contextual(self, text, **context):
+            return 'VI ' + text
+    models = ContextModels()
+    session = LiveTranslationSession(lambda: models, capture_factory=screen.open, group_dialogue=True, history_turns=2)
+    try:
+        session.start(REGION)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and session.poll() is None:
+            time.sleep(.005)
+        session.clear()
+        session.clear_context()
+        assert session.poll().lines == ()
+        session.configure_live(frame_crop=None, frame_crops=(), history_turns=1, post_translation_delay_ms=0)
+        assert screen.wait_for_captures(1, 3)
+        time.sleep(.15)
+        assert session.poll() is None
+        screen.show(3)
+        deadline = time.monotonic() + 3
+        update = None
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update and update.lines:
+                break
+            time.sleep(.005)
+        assert update and update.lines[0].source == 'Third line'
+    finally:
+        session.close()
+
+def test_clear_remains_hidden_when_only_outside_crops_changes():
+    from core.live_translation import WindowCrop
+    from contextlib import nullcontext
+    class Capture:
+        outside = 0
+        dialogue = 1
+        def grab(self, region):
+            frame = np.full((3, 4, 3), self.outside, dtype=np.uint8)
+            frame[:, :2] = self.dialogue
+            return frame
+    capture, models = Capture(), Models()
+    session = LiveTranslationSession(
+        lambda: models, capture_factory=lambda: nullcontext(capture), group_dialogue=True,
+        frame_crops=((WindowCrop(0, 0, .5, 1), 'dialogue', ''),), history_turns=2,
+    )
+    models.translate_contextual = lambda text, **context: 'VI ' + text
+    try:
+        session.start(REGION)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and session.poll() is None:
+            time.sleep(.005)
+        session.clear()
+        assert session.poll().lines == ()
+        capture.outside = 2
+        time.sleep(.2)
+        assert session.poll() is None
+        capture.dialogue = 3
+        deadline = time.monotonic() + 3
+        update = None
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update and update.lines:
+                break
+            time.sleep(.005)
+        assert update and update.lines[0].source == 'Third line'
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("once", "delay", "newer_frame"),
+    [(False, 0, False), (False, 20, False), (False, 20, True), (True, 20, False)],
+)
+def test_clear_context_retries_in_flight_crops_with_empty_history(once, delay, newer_frame):
+    entered, release = threading.Event(), threading.Event()
+
+    class ContextModels(Models):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+            self.text[2] = "Second line"
+
+        def translate_contextual(self, text, *, role, rules, speaker, history):
+            self.calls.append((text, rules, tuple(source for _, source, _ in history)))
+            if text == "Second line" and rules == "left" and not entered.is_set():
+                entered.set()
+                assert release.wait(3)
+            return f"{len(history)} turns: {text}"
+
+    screen, models = Screen(), ContextModels()
+    crops = (
+        (live_translation.WindowCrop(0, 0, .5, 1), "dialogue", "left"),
+        (live_translation.WindowCrop(.5, 0, 1, 1), "dialogue", "right"),
+    )
+    session = LiveTranslationSession(
+        lambda: models, capture_factory=screen.open, group_dialogue=True,
+        frame_crops=crops, history_turns=4, post_translation_delay_ms=delay,
+    )
+
+    def wait_update(source, expected_translations):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update is not None:
+                assert update.error is None
+                for index, line in enumerate(update.lines):
+                    if line.source == source:
+                        assert line.translation == expected_translations[index]
+                if tuple(line.source for line in update.lines) == (source, source):
+                    return update
+            time.sleep(.005)
+        raise AssertionError("Translation did not finish")
+
+    try:
+        if once:
+            first_request = session.request_once(REGION)
+        else:
+            first_request = None
+            session.start(REGION)
+        baseline = wait_update("First line", ["0 turns: First line", "1 turns: First line"])
+        assert baseline.request_id == first_request
+        if baseline.render_id is not None:
+            session.acknowledge_render(baseline.render_id)
+
+        screen.show(2)
+        request = session.request_once(REGION) if once else None
+        assert entered.wait(3)
+        assert models.calls[-1] == ("Second line", "left", ("First line", "First line"))
+        if once:
+            screen.show(3)
+        else:
+            session.move(OTHER_REGION)
+            if newer_frame:
+                screen.show(3)
+                assert screen.wait_for_captures(3)
+        session.clear_context()
+        assert session.poll() is None
+        release.set()
+
+        source = "Third line" if newer_frame else "Second line"
+        update = wait_update(source, [f"0 turns: {source}", f"1 turns: {source}"])
+        assert update.request_id == request
+        assert update.region == (REGION if once else OTHER_REGION)
+        assert models.calls[3:] == [
+            (source, "left", ()),
+            (source, "right", (source,)),
+        ]
+        assert (update.render_id is not None) == (not once and delay > 0)
+    finally:
+        release.set()
+        session.close()
+
+
+def test_clear_context_drops_an_unpolled_live_update_and_its_render_gate():
+    feed = DialogueFeed()
+    session = LiveTranslationSession(
+        lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=2,
+        post_translation_delay_ms=20,
+    )
+    try:
+        session.start(REGION)
+        baseline = feed.wait_for_update(session, "How was your day?")
+        session.acknowledge_render(baseline.render_id)
+        feed.sources[2] = "Next line"
+        feed.show(2)
+        deadline = time.monotonic() + 3
+        stale_render_id = None
+        while stale_render_id is None and time.monotonic() < deadline:
+            with session._state:
+                if session._update is not None:
+                    stale_render_id = session._update.render_id
+            time.sleep(.005)
+        assert stale_render_id is not None
+        session.clear_context()
+
+        refreshed = feed.wait_for_update(session, "Next line")
+        assert feed.calls[-1] == ("Next line", ())
+        assert refreshed.render_id is not None and refreshed.render_id != stale_render_id
+    finally:
+        session.close()
+
+
+def test_idle_context_clear_does_not_put_unchanged_dialogue_back_in_history():
+    class TwoCropFeed(DialogueFeed):
+        def grab(self, region):
+            frame = super().grab(region)
+            frame[:, :2] = 1
+            return frame
+
+    feed = TwoCropFeed()
+    feed.sources.update({2: "Current topic", 3: "New topic"})
+    session = LiveTranslationSession(
+        lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=4,
+        frame_crops=(
+            (live_translation.WindowCrop(0, 0, .5, 1), "dialogue", ""),
+            (live_translation.WindowCrop(.5, 0, 1, 1), "dialogue", ""),
+        ),
+        post_translation_delay_ms=20,
+    )
+
+    def wait_right(source):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            update = session.poll()
+            if update is not None:
+                assert tuple(line.source for line in update.lines) == ("How was your day?", source)
+                return update
+            time.sleep(.005)
+        raise AssertionError(f"Missing translation for {source!r}")
+
+    try:
+        feed.show(2)
+        session.start(REGION)
+        baseline = wait_right("Current topic")
+        session.acknowledge_render(baseline.render_id)
+        session.clear_context()
+        assert session.poll() is None
+        feed.show(3)
+        wait_right("New topic")
+        assert feed.calls == [
+            ("How was your day?", ()),
+            ("Current topic", ("How was your day?",)),
+            ("New topic", ()),
+        ]
+    finally:
+        session.close()
+
+
+def test_context_clear_keeps_a_completed_unpolled_one_shot():
+    feed = DialogueFeed()
+    session = LiveTranslationSession(
+        lambda: feed, capture_factory=feed.open, group_dialogue=True, history_turns=2,
+    )
+    try:
+        request = session.request_once(REGION)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with session._state:
+                if session._update is not None:
+                    break
+            time.sleep(.005)
+        session.clear_context()
+        completed = session.poll()
+        assert completed is not None and completed.request_id == request
+        assert [line.source for line in completed.lines] == ["How was your day?"]
+    finally:
         session.close()

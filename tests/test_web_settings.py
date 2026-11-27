@@ -8,7 +8,7 @@ from core.qwen_rules import QwenRule
 def _draft(settings):
     return {key: getattr(settings, key) for key in
             ("det", "rec", "ja_model", "flow", "qwen_model", "qwen_context", "qwen_backend", "animation_enabled",
-             "settings_interface", "crop_count", "history_turns", "translation_color")}
+             "settings_interface", "crop_count", "history_turns", "translation_color", "post_translation_delay_ms")}
 
 
 def _request(session, method, draft=None):
@@ -191,3 +191,47 @@ def test_incompatible_cuda_is_blocked_at_save_and_can_switch_to_vulkan(tmp_path,
 
     assert _request(session, "save", _draft(original))["ok"]
     run.assert_called_once()
+
+
+def test_post_translation_delay_round_trip_and_validation(tmp_path, monkeypatch):
+    from frontend import ocr_settings_window
+    from frontend.web_settings import WebSettingsSession
+
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_: [])
+    original = OCRSettings.load(tmp_path)
+    assert original.post_translation_delay_ms == 0
+    session = WebSettingsSession(Mock(), tmp_path, original, "EN", Mock())
+    assert _request(session, "bootstrap")["settings"]["post_translation_delay_ms"] == 0
+    draft = _draft(original)
+    for invalid in (-1, 5001, 1.5, True, "", "1.5"):
+        assert not _request(session, "save", draft | {"post_translation_delay_ms": invalid})["ok"]
+    assert _request(session, "save", draft | {"post_translation_delay_ms": "5000"})["ok"]
+    saved = OCRSettings.load(tmp_path)
+    assert saved.post_translation_delay_ms == 5000
+    assert saved.same_pipeline_as(original)
+    assert saved.preset == original.preset
+
+
+def test_invalid_saved_delay_defaults_without_discarding_other_settings(tmp_path):
+    path = OCRSettings._path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"det": "medium", "post_translation_delay_ms": true}', encoding="utf-8")
+    loaded = OCRSettings.load(tmp_path)
+    assert loaded.det == "medium"
+    assert loaded.post_translation_delay_ms == 0
+
+
+def test_web_hot_settings_and_restart_context_save_without_rechecking_models(tmp_path, monkeypatch):
+    from frontend import ocr_settings_window
+    from frontend.web_settings import WebSettingsSession
+
+    original = OCRSettings(flow="direct")
+    inventory = Mock()
+    monkeypatch.setattr(ocr_settings_window, "model_items", inventory)
+    session = WebSettingsSession(Mock(), tmp_path, original, "EN", Mock())
+    draft = _draft(original) | {"qwen_context": "8000", "history_turns": 4, "crop_count": 2}
+
+    assert _request(session, "save", draft)["ok"]
+    inventory.assert_not_called()
+    saved = OCRSettings.load(tmp_path)
+    assert (saved.qwen_context, saved.history_turns, saved.crop_count) == (8000, 4, 2)

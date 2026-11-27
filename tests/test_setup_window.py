@@ -294,6 +294,24 @@ def test_select_all_models_automatically_retries_when_download_recovers(drive_wi
     assert attempts == ["OCR", "OCR", "Dịch"]
 
 
+def test_certificate_failure_shows_https_hint_and_manual_retry(drive_window):
+    from core.setup_types import DownloadCertificateError
+
+    def install(progress):
+        raise DownloadCertificateError("Could not verify the TLS certificate for github.com.")
+
+    def check(root):
+        if not find(root, ttk.Button, "Thử lại"):
+            return False
+        details = [child.cget("text") for child in widgets(root) if isinstance(child, ttk.Label)]
+        assert any("Không thể xác minh chứng chỉ HTTPS" in text and "github.com" in text for text in details)
+        assert find(root, ttk.Button, "Thử ngay") is None
+        return close(root)
+
+    missing = item("Qwen CUDA", "model", lambda: False, install)
+    assert not drive_window([missing], [press(missing.label, ttk.Checkbutton), press("Cài mô hình đã chọn"), check])
+
+
 def test_installer_return_without_ready_assets_requires_manual_retry(drive_window):
     attempts = []
 

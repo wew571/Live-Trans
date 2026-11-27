@@ -14,7 +14,7 @@ from win32gui import error as Win32Error
 from core import configure_runtime
 from core.config import APP_ICON_PATH, APP_NAME, ASSETS_DIR
 from core.live_translation import WindowCrop
-from core.ocr_settings import FLOW_DIRECT, INTERFACE_MINIMAL
+from core.ocr_settings import FLOW_DIRECT, FLOW_NLLB_VINAI, INTERFACE_MINIMAL
 from core.qwen_rules import load_rule_slots, parse_crop_rule
 from core.setup_libraries import optional_library_items
 from core.setup_models import available_model_settings, model_items
@@ -235,6 +235,7 @@ class ControlPanel(ctk.CTk):
         self._status = ("status_ready", "#a6e3a1", "")
         self.floating_widget = None
         self._ocr_settings = available_model_settings(_ROOT)
+        self._active_qwen_context = self._ocr_settings.qwen_context
         self._token_count = 0
         self._settings_window = None
         self._live_session_factory = live_session_factory or self._create_live_session
@@ -277,10 +278,25 @@ class ControlPanel(ctk.CTk):
         if crops is None:
             crops = self._session_crops()
         return LiveTranslationSession(
-            partial(LiveModelClient, ocr_settings=self._ocr_settings), capture_fps=int(fps),
-            capture_factory=capture_factory, frame_crop=frame_crop if not crops else None,
+            partial(LiveModelClient, ocr_settings=replace(settings, qwen_context=self._active_qwen_context)),
+            capture_fps=int(fps), capture_factory=capture_factory, frame_crop=frame_crop if not crops else None,
             group_dialogue=direct, frame_crops=crops, history_turns=settings.history_turns if direct else 0,
+            post_translation_delay_ms=settings.post_translation_delay_ms,
         )
+
+    def _configure_live_session(self, crops=None):
+        if self._live_session is None:
+            return
+        settings = self._ocr_settings
+        if crops is None:
+            crops = self._session_crops()
+        frame_crop = self._live_window_crop if self._live_capture_mode == "window" and not crops else None
+        self._live_session.configure_live(
+            frame_crop=frame_crop, frame_crops=crops,
+            history_turns=settings.history_turns if settings.flow == FLOW_DIRECT else 0,
+            post_translation_delay_ms=settings.post_translation_delay_ms,
+        )
+        self._live_session_crops = crops
 
     def _session_crops(self):
         settings = self._ocr_settings
@@ -348,18 +364,43 @@ class ControlPanel(ctk.CTk):
 
     def _apply_ocr_settings(self, settings):
         previous = self._ocr_settings
+        regions_changed = settings.crop_count != previous.crop_count
+        history_changed = settings.history_turns != previous.history_turns
+        delay_changed = settings.post_translation_delay_ms != previous.post_translation_delay_ms
         pipeline_changed = not settings.same_pipeline_as(previous)
         if pipeline_changed:
             self._stop_live()
             self._close_live_session()
         self._ocr_settings = settings
-        if pipeline_changed:
+        if not pipeline_changed and (regions_changed or history_changed or delay_changed):
+            self._apply_live_configuration(regions_changed)
+        if pipeline_changed or history_changed:
             self._sync_token_card()
         if settings.translation_color != previous.translation_color:
             self.history_box.tag_config("translation", foreground=settings.translation_color or "")
             if self._live_overlay is not None:
                 self._live_overlay.set_translation_color(settings.translation_color)
         self._update_area_label()
+
+    def _apply_live_configuration(self, regions_changed):
+        if self._live_session is None:
+            return
+        if regions_changed and self._once_region is not None:
+            self._stop_live()
+        desktop = self._live_capture_mode == "desktop"
+        restart_capture = regions_changed and self._live_region is not None and (
+            (self._ocr_settings.crop_count > 1 and not self._crop_regions())
+            or (desktop and self._live_region != self._desktop_capture_region())
+        )
+        crops = self._session_crops()
+        if restart_capture:
+            self._stop_live()
+        elif regions_changed and self._live_region is not None and crops != self._live_session_crops:
+            self._live_overlay.clear()
+            self._last_live_pairs.clear()
+        self._configure_live_session(crops)
+        if restart_capture:
+            self._start_live()
 
     def _open_model_setup(self):
         from frontend.setup_window import run_setup
@@ -650,7 +691,7 @@ class ControlPanel(ctk.CTk):
             self.top_row.grid_columnconfigure(2, weight=1, uniform="dashboard_cards")
             self.auto_card.grid_configure(padx=5)
             self.token_card.grid()
-            self._update_token_meter(0)
+            self._update_token_meter(self._token_count)
         else:
             self._hide_token_tooltip()
             self.token_card.grid_remove()
@@ -661,7 +702,7 @@ class ControlPanel(ctk.CTk):
         self._token_count = count
         if self._ocr_settings.flow != FLOW_DIRECT:
             return
-        limit = self._ocr_settings.qwen_context
+        limit = self._active_qwen_context
         percent = count * 100 // limit
         color = "#f38ba8" if percent >= 80 else "#a6e3a1"
         self.token_bar.configure(progress_color=color)
@@ -706,7 +747,7 @@ class ControlPanel(ctk.CTk):
         was_live = self._live_region is not None
         dashboard_visible = self.state() == "normal"
         if (was_live or self._once_region is not None) and not preview:
-            self._stop_live()
+            self._stop_live(reset_context=False)
         if dashboard_visible:
             self.withdraw()
         if self.floating_widget:
@@ -733,14 +774,14 @@ class ControlPanel(ctk.CTk):
                             self._live_window_crop = crop
                         else:
                             self._extra_crops[self._live_capture_mode][index] = crop
-                self._close_live_session()
+                self._configure_live_session()
                 self._update_area_label()
             if dashboard_visible:
                 self.restore_dashboard()
             elif self.floating_widget:
                 self.floating_widget.deiconify()
             if was_live and not preview:
-                self._start_live()
+                self._start_live(reset_context=region is not None)
 
         texts = LANG_TEXTS[self.current_lang]
         def pick_next():
@@ -1018,29 +1059,20 @@ class ControlPanel(ctk.CTk):
             self._live_session.clear_context()
 
     def _reset_area(self):
+        window_mode = self._live_capture_mode == "window"
+        primary_crop = self._live_window_crop if window_mode else self._desktop_area
         extra = self._extra_crops[self._live_capture_mode]
-        had_extra = bool(extra)
-        extra.clear()
-        if self._live_capture_mode != "window":
-            if had_extra:
-                was_live = self._live_region is not None
-                if was_live:
-                    self._stop_live()
-                self._close_live_session()
-                self._set_area(None)
-                self._update_area_label()
-                if was_live:
-                    self._start_live()
-            else:
-                self._set_area(None)
-            return
-        if self._live_window_crop is None and not had_extra:
+        if primary_crop is None and not extra:
             return
         was_live = self._live_region is not None
-        if was_live:
+        if was_live or self._once_region is not None:
             self._stop_live()
-        self._close_live_session()
-        self._live_window_crop = None
+        extra.clear()
+        if window_mode:
+            self._live_window_crop = None
+        else:
+            self._set_area(None)
+        self._configure_live_session()
         self._update_area_label()
         if was_live:
             self._start_live()
@@ -1110,17 +1142,23 @@ class ControlPanel(ctk.CTk):
         if self._live_region is not None:
             self._live_session.clear()
             self._live_overlay.clear()
-        elif self._once_region is not None:
-            self._stop_live()
+        elif self._once_region is not None and self._once_request_id is None:
+            self._live_overlay.clear()
+            self._live_overlay.hide()
+            self._once_region = None
+            self._last_live_pairs.clear()
 
-    def _start_live(self):
+    def _desktop_capture_region(self):
+        return (self._desktop_area if self._ocr_settings.crop_count == 1 else None) or self.fullscreen_region()
+
+    def _start_live(self, *, reset_context=True):
         if self._once_request_id is not None:
             return
         if self._closing or self._live_region is not None or self._picker is not None:
             self._set_monitor(self._live_region is not None)
             return
         once = self._once_mode
-        if self._ocr_settings.flow == FLOW_DIRECT:
+        if self._ocr_settings.flow in (FLOW_DIRECT, FLOW_NLLB_VINAI):
             missing = [item.label for item in model_items(_ROOT, self._ocr_settings) if not item.is_ready()]
             if missing:
                 self._set_monitor(False)
@@ -1168,7 +1206,7 @@ class ControlPanel(ctk.CTk):
                 if self._live_session is None:
                     self._live_session = self._create_window_live_session(self._live_window)
             else:
-                region = (self._desktop_area if self._ocr_settings.crop_count == 1 else None) or self.fullscreen_region()
+                region = self._desktop_capture_region()
                 self._live_overlay.prepare(region)
                 self._exclude_control(self)
                 if self.floating_widget:
@@ -1179,8 +1217,10 @@ class ControlPanel(ctk.CTk):
                 request_id = self._live_session.request_once(region)
                 if request_id is None:
                     raise RuntimeError("The translation session is busy. Try again.")
-            else:
+            elif reset_context:
                 self._live_session.start(region)
+            else:
+                self._live_session.start(region, reset_context=False)
         except Exception as error:
             self._abort_live(error)
             return
@@ -1197,9 +1237,12 @@ class ControlPanel(ctk.CTk):
         self._sync_capture_widgets()
         self._set_status("status_live_waiting" if overlay_visible else "status_live_focus_window", "#f9e2af")
 
-    def _stop_live(self):
+    def _stop_live(self, *, reset_context=True):
         if self._live_session is not None and (self._live_region is not None or self._once_region is not None):
-            self._live_session.stop()
+            if reset_context:
+                self._live_session.stop()
+            else:
+                self._live_session.stop(reset_context=False)
         self._live_region = None
         self._once_region = None
         self._once_request_id = None
@@ -1268,6 +1311,9 @@ class ControlPanel(ctk.CTk):
             return
 
         self._render_live_update(update, update.region)
+        render_id = getattr(update, "render_id", None)
+        if render_id is not None:
+            self._live_session.acknowledge_render(render_id)
         if overlay_visible:
             self._set_status("status_live_running", "#a6e3a1")
 
@@ -1314,6 +1360,13 @@ class ControlPanel(ctk.CTk):
             self._live_overlay.hide()
             self._set_status("status_live_error", "#f38ba8", str(update.error))
             return
+        if update.lines and self._live_capture_mode == "desktop":
+            # The desktop frame is already captured, so the retained subtitles can appear in screenshots.
+            try:
+                self._live_overlay.set_capture_exclusion(False)
+            except (OSError, RuntimeError, Win32Error) as error:
+                self._abort_live(error)
+                return
         self._render_live_update(update, region)
         if update.lines:
             self._set_status("status_ready", "#a6e3a1")

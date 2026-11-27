@@ -99,12 +99,16 @@ class LiveOverlay:
                     hwnd, win32con.GWL_EXSTYLE,
                     styles | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_NOACTIVATE,
                 )
-                set_capture_exclusion(window, exclude_from_capture)
+            self.set_capture_exclusion(exclude_from_capture)
             self.window.lift(self.background_window)
         except (OSError, RuntimeError, win32gui.error):
             self.hide()
             raise
         self.region = region
+
+    def set_capture_exclusion(self, enabled):
+        for window in (self.background_window, self.window):
+            set_capture_exclusion(window, enabled)
 
     @staticmethod
     def _position(hwnd, x, y):
@@ -217,8 +221,7 @@ class RegionPicker:
         )
         cancel.place(relx=1, rely=1, x=-12, y=-12, anchor="se")
         self.window.protocol("WM_DELETE_WINDOW", lambda: self._finish(None))
-        if preview is not None:
-            self.window.bind("<Escape>", lambda _event: self._finish(None))
+        self.window.bind("<Escape>", lambda _event: self._finish(None))
         self.window.update_idletasks()
         hwnd = win32gui.GetAncestor(self.window.winfo_id(), win32con.GA_ROOT)
         win32gui.SetWindowPos(hwnd, 0, x, y, 0, 0,

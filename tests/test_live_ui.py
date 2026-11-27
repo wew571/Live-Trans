@@ -49,15 +49,21 @@ def panel(gui):
 
 def test_live_capture_fps_uses_the_environment_setting(monkeypatch):
     from core import live_translation
+    from core.ocr_settings import OCRSettings
 
     create_session = Mock()
     monkeypatch.setattr(live_translation, "LiveTranslationSession", create_session)
     monkeypatch.setenv("LIVE_CAPTURE_FPS", "60")
-    dashboard = SimpleNamespace(_ocr_settings=Mock(), _live_session_crops=None, _session_crops=lambda: ())
+    dashboard = SimpleNamespace(
+        _ocr_settings=OCRSettings(qwen_context=8000, post_translation_delay_ms=300),
+        _active_qwen_context=3000, _live_session_crops=None, _session_crops=lambda: (),
+    )
 
     ControlPanel._create_live_session(dashboard)
 
     assert create_session.call_args.kwargs["capture_fps"] == 60
+    assert create_session.call_args.kwargs["post_translation_delay_ms"] == 300
+    assert create_session.call_args.args[0].keywords["ocr_settings"].qwen_context == 3000
 
 
 def test_dashboard_uses_live_trans_name_and_transparent_assets(panel):
@@ -636,8 +642,8 @@ def test_settings_cancels_tier_animation_when_closed(panel, tmp_path, monkeypatc
             dialog.destroy()
 
 
-@pytest.mark.parametrize("index", [0, 1])
-def test_flash_and_medium_lock_pivot_while_allowing_advanced_customization(panel, tmp_path, monkeypatch, index):
+@pytest.mark.parametrize("index, flow", [(0, "pivot"), (1, "nllb-vinai")])
+def test_flash_and_medium_lock_their_flow_while_allowing_ocr_edits(panel, tmp_path, monkeypatch, index, flow):
     from core.ocr_settings import OCRSettings
     from frontend import ocr_settings_window, ui
 
@@ -650,13 +656,14 @@ def test_flash_and_medium_lock_pivot_while_allowing_advanced_customization(panel
     dialog._choose_preset(index)
     assert dialog.flow_menu.cget("state") == "disabled"
     dialog.det_menu.set("PP-OCRv6 Medium" if index == 0 else "PP-OCRv6 Small")
-    dialog.ja_menu.set("NLLB-200 Distilled 600M" if index == 0 else "Mitsua ElanMT")
+    if index == 0:
+        dialog.ja_menu.set("NLLB-200 Distilled 600M")
     dialog._update_selection()
     assert dialog.flow_menu.cget("state") == "disabled"
-    assert dialog._selection().flow == "pivot"
+    assert dialog._selection().flow == flow
     dialog.save_button.invoke()
     saved = OCRSettings.load(tmp_path)
-    assert saved.flow == "pivot"
+    assert saved.flow == flow
     assert saved.det == ("medium" if index == 0 else "small")
     assert saved.ja_model == ("nllb" if index == 0 else "mitsua")
 
@@ -707,12 +714,14 @@ def test_matching_medium_by_advanced_edits_locks_the_flow(panel, tmp_path, monke
     dashboard.btn_settings.invoke()
     dialog = dashboard._settings_window
     try:
-        dialog.flow_menu.set("Nhật → Anh → Việt")
+        dialog.flow_menu.set("Nhật → Việt · Anh → Việt (NLLB + VinAI)")
         dialog.rec_menu.set("PP-OCRv6 Small")
-        dialog.ja_menu.set("NLLB-200 Distilled 600M")
         dialog._update_selection()
         assert dialog.preset_name.cget("text") == "Medium"
         assert dialog.flow_menu.cget("state") == "disabled"
+        assert "NLLB Custom ONNX · VinAI v2\nNhật → Việt · Anh → Việt" in dialog.summary.cget("text")
+        assert not dialog.pivot_frame.winfo_manager()
+        assert not dialog.context_frame.winfo_manager()
     finally:
         dialog.destroy()
 
@@ -749,7 +758,7 @@ def test_sidebar_setup_offers_missing_nllb_after_medium_save_is_blocked(panel, t
     monkeypatch.setattr(ui, "_ROOT", tmp_path)
     monkeypatch.setattr(dashboard, "_ocr_settings", PRESETS["Flash"])
     monkeypatch.setattr(setup_models, "_ready_path", lambda root, env, model: (
-        None if model.key == "translate-ja-en-nllb" else tmp_path
+        None if model.key == "translate-ja-vi-nllb-custom" else tmp_path
     ))
 
     dashboard.btn_settings.invoke()
@@ -778,7 +787,7 @@ def test_sidebar_setup_offers_missing_nllb_after_medium_save_is_blocked(panel, t
             optional_group = any(isinstance(widget, ttk.Label) and widget.winfo_ismapped()
                                  and widget.cget("text") == "Mô hình bổ sung" for widget in controls)
             addon = any(isinstance(widget, ttk.Checkbutton) and widget.winfo_ismapped()
-                        and widget.instate(["!disabled"]) and "NLLB" in widget.cget("text")
+                        and widget.instate(["!disabled"]) and "NLLB Custom ONNX" in widget.cget("text")
                         for widget in controls)
             continue_button = next((widget for widget in controls if isinstance(widget, ttk.Button)
                                     and widget.winfo_ismapped() and widget.instate(["!disabled"])
@@ -909,9 +918,26 @@ def test_region_picker_can_be_cancelled_with_a_button(gui):
     finished = Mock()
     picker = RegionPicker(dashboard, finished, "Select a region", "Cancel", region=(40, 40, 320, 200))
     try:
-        assert not picker.window.bind("<Escape>")
         picker.window.nametowidget("cancel").invoke()
         finished.assert_called_once_with(None)
+        assert not picker.window.winfo_exists()
+    finally:
+        if picker.window.winfo_exists():
+            picker.close()
+
+
+@pytest.mark.parametrize("preview", [None, []])
+def test_region_picker_escape_cancels_selection_and_preview(gui, preview):
+    from frontend.live_overlay import RegionPicker
+
+    dashboard, _, _, _ = gui
+    results = []
+    picker = RegionPicker(dashboard, results.append, "Select a region", "Cancel",
+                          region=(40, 40, 320, 200), preview=preview)
+    try:
+        picker.window.update()
+        picker.window.event_generate("<Escape>")
+        assert results == [None]
         assert not picker.window.winfo_exists()
     finally:
         if picker.window.winfo_exists():
@@ -991,6 +1017,54 @@ def test_translate_once_is_a_mode_and_scan_ignores_unrelated_updates(panel, monk
     finally:
         session.request_once.side_effect = None
         dashboard._apply_ocr_settings(previous_settings)
+
+
+def test_desktop_translate_once_makes_subtitles_capturable_after_capture(panel, monkeypatch):
+    import ctypes
+
+    import win32con
+    import win32gui
+
+    from core.live_translation import LiveUpdate, TranslatedLine
+    from frontend.live_overlay import LiveOverlay
+
+    dashboard, session, _ = panel
+    overlay = LiveOverlay(dashboard)
+    monkeypatch.setattr(dashboard, "_live_overlay", overlay)
+    get_affinity = ctypes.WinDLL("user32", use_last_error=True).GetWindowDisplayAffinity
+    get_affinity.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+
+    def layer_affinities():
+        affinities = []
+        for window in (overlay.window, overlay.background_window):
+            hwnd = win32gui.GetAncestor(window.winfo_id(), win32con.GA_ROOT)
+            affinity = ctypes.c_uint()
+            assert get_affinity(hwnd, ctypes.byref(affinity))
+            affinities.append(affinity.value)
+        return affinities
+
+    try:
+        region = (20, 20, 320, 150)
+        dashboard._set_area(region)
+        dashboard._set_live_capture_mode("once")
+        session.request_once.return_value = 41
+        dashboard.btn_scan.invoke()
+        assert layer_affinities() == [0x11, 0x11]
+
+        line = TranslatedLine((10, 20, 140, 40), "Test text", "Chữ đã dịch")
+        session.poll.return_value = LiveUpdate(region, (line,), request_id=41)
+        dashboard._poll_live()
+        assert layer_affinities() == [0, 0]
+        assert overlay.canvas.find_all() and overlay.background_canvas.find_all()
+
+        session.poll.return_value = None
+        session.request_once.return_value = 42
+        dashboard.btn_scan.invoke()
+        assert layer_affinities() == [0x11, 0x11]
+        assert not overlay.canvas.find_all() and not overlay.background_canvas.find_all()
+    finally:
+        dashboard._stop_live()
+        overlay.close()
 
 
 def test_translate_once_window_picker_and_retained_overlay(panel, monkeypatch):
@@ -1084,7 +1158,8 @@ def test_translate_once_waits_for_regions_and_drops_result_after_settings_change
         session.request_once.assert_called_once_with(region)
         assert len(dashboard._live_session_crops) == 2
         dashboard._apply_ocr_settings(OCRSettings())
-        session.close.assert_called()
+        session.close.assert_not_called()
+        session.stop.assert_called_once()
         line = TranslatedLine((0, 0, 25, 10), "Late text", "VI Late text")
         session.poll.return_value = LiveUpdate(region, (line,), request_id=21)
         dashboard._poll_live()
@@ -1438,3 +1513,181 @@ def test_restarting_with_an_edited_crop_rule_recreates_session(panel, tmp_path, 
     finally:
         dashboard._stop_live()
         dashboard._close_live_session()
+
+
+def test_context_limit_waits_for_app_restart_while_history_applies_to_live(panel, monkeypatch):
+    from dataclasses import replace
+
+    from core.ocr_settings import OCRSettings
+
+    dashboard, session, _ = panel
+    previous = dashboard._ocr_settings
+    monkeypatch.setattr("frontend.ui.model_items", lambda *_: [])
+    try:
+        dashboard._apply_ocr_settings(OCRSettings(flow="direct", qwen_context=3000))
+        dashboard._start_live()
+        session.reset_mock()
+        dashboard._update_token_meter(1500)
+
+        dashboard._apply_ocr_settings(replace(dashboard._ocr_settings, qwen_context=8000, history_turns=4))
+
+        assert dashboard._ocr_settings.qwen_context == 8000
+        assert dashboard.token_tooltip.cget("text") == "1500/3000 token"
+        assert dashboard._live_session is session
+        assert dashboard._live_region is not None
+        assert session.configure_live.call_args.kwargs["history_turns"] == 4
+        session.close.assert_not_called()
+        session.stop.assert_not_called()
+    finally:
+        dashboard._stop_live()
+        dashboard._apply_ocr_settings(previous)
+
+
+def test_clear_overlay_after_once_keeps_dialogue_context(panel):
+    from core.live_translation import LiveUpdate, TranslatedLine
+
+    dashboard, session, overlay = panel
+    dashboard._set_live_capture_mode("once")
+    session.request_once.return_value = 42
+    try:
+        dashboard._start_live()
+        region = dashboard._once_region
+        line = TranslatedLine((0, 0, 20, 10), "First line", "VI First line")
+        session.poll.return_value = LiveUpdate(region, (line,), request_id=42)
+        dashboard._poll_live()
+
+        dashboard.btn_clear.invoke()
+
+        session.stop.assert_not_called()
+        session.clear_context.assert_not_called()
+        overlay.clear.assert_called()
+        assert dashboard._once_region is None
+    finally:
+        dashboard._stop_live()
+        dashboard._set_live_capture_mode("desktop")
+
+
+def test_crop_cancel_keeps_old_regions_and_committed_crop_reuses_session(panel, monkeypatch):
+    from core.ocr_settings import OCRSettings
+
+    dashboard, session, _ = panel
+    picker = Mock()
+    monkeypatch.setattr("frontend.ui.RegionPicker", picker)
+    monkeypatch.setattr(dashboard, "_extra_crops", {"window": {}, "desktop": {}})
+    previous = dashboard._ocr_settings
+    try:
+        old = (20, 40, 100, 100)
+        new = (60, 90, 100, 100)
+        dashboard._set_area(old)
+        dashboard._apply_ocr_settings(OCRSettings(crop_count=2))
+        dashboard._start_live()
+        session.reset_mock()
+
+        dashboard.start_area_selection()
+        picker.call_args.args[1](new)
+        picker.call_args.args[1](None)
+
+        assert dashboard._desktop_area == old
+        assert dashboard._live_session is session
+        session.close.assert_not_called()
+
+        dashboard.start_area_selection()
+        picker.call_args.args[1](new)
+        picker.call_args.args[1]((200, 200, 100, 100))
+
+        assert dashboard._desktop_area == new
+        assert dashboard._live_session is session
+        assert len(session.configure_live.call_args.kwargs["frame_crops"]) == 2
+        session.close.assert_not_called()
+    finally:
+        dashboard._stop_live()
+        dashboard._apply_ocr_settings(previous)
+
+
+def test_live_acknowledges_delay_after_overlay_render(panel):
+    from core.live_translation import LiveUpdate, TranslatedLine
+
+    dashboard, session, overlay = panel
+    dashboard._start_live()
+    region = dashboard._live_region
+    line = TranslatedLine((0, 0, 20, 10), "Test line", "VI Test line")
+    session.poll.return_value = LiveUpdate(region, (line,), render_id=5)
+
+    session.acknowledge_render.side_effect = lambda _: overlay.render.assert_called_once_with(region, (line,))
+    try:
+        dashboard._poll_live()
+
+        session.acknowledge_render.assert_called_once_with(5)
+    finally:
+        session.acknowledge_render.side_effect = None
+        dashboard._stop_live()
+
+
+def test_native_settings_save_delay_without_restarting_live(panel, tmp_path, monkeypatch):
+    from core.ocr_settings import OCRSettings
+    from frontend import ocr_settings_window, ui
+
+    dashboard, session, _ = panel
+    previous = dashboard._ocr_settings
+    monkeypatch.setattr(ui, "_ROOT", tmp_path)
+    monkeypatch.setattr(ocr_settings_window, "model_items", lambda *_: [])
+    try:
+        dashboard._apply_ocr_settings(OCRSettings())
+        dashboard._start_live()
+        session.reset_mock()
+        dashboard.btn_settings.invoke()
+        dialog = dashboard._settings_window
+        assert dialog.delay_entry.get() == "0"
+
+        dialog.delay_entry.delete(0, "end")
+        dialog.delay_entry.insert(0, "5001")
+        dialog.save_button.invoke()
+        assert dialog.winfo_exists()
+        assert dialog.status.cget("text") == dialog._texts["invalid_delay"]
+
+        dialog.delay_entry.delete(0, "end")
+        dialog.delay_entry.insert(0, "300")
+        dialog.save_button.invoke()
+
+        assert not dialog.winfo_exists()
+        assert OCRSettings.load(tmp_path).post_translation_delay_ms == 300
+        assert session.configure_live.call_args.kwargs["post_translation_delay_ms"] == 300
+        session.close.assert_not_called()
+        session.stop.assert_not_called()
+    finally:
+        if dashboard._settings_window is not None and dashboard._settings_window.winfo_exists():
+            dashboard._settings_window.destroy()
+        dashboard._stop_live()
+        dashboard._apply_ocr_settings(previous)
+
+
+def test_resetting_window_crop_discards_retained_once_overlay_and_keeps_models(panel, monkeypatch):
+    from core.live_translation import LiveUpdate, TranslatedLine, WindowCrop
+
+    dashboard, session, overlay = panel
+    target = Mock(title="Crop target")
+    target.bounds.return_value = region = (10, 20, 200, 300)
+    target.is_foreground.return_value = True
+    monkeypatch.setattr(dashboard, "_create_window_live_session", Mock(return_value=session))
+    dashboard._set_live_capture_mode("window")
+    dashboard._select_live_window(target)
+    dashboard._live_window_crop = WindowCrop(0, .5, 1, 1)
+    dashboard._set_live_capture_mode("once")
+    session.request_once.return_value = 42
+    try:
+        dashboard._start_live()
+        line = TranslatedLine((0, 200, 20, 210), "First line", "VI First line")
+        session.poll.return_value = LiveUpdate(region, (line,), request_id=42)
+        dashboard._poll_live()
+
+        session.reset_mock()
+        overlay.reset_mock()
+        dashboard._reset_area()
+
+        assert dashboard._once_region is None
+        overlay.hide.assert_called()
+        assert session.configure_live.call_args.kwargs["frame_crop"] is None
+        session.close.assert_not_called()
+    finally:
+        dashboard._stop_live()
+        dashboard._set_live_capture_mode("desktop")

@@ -11,7 +11,7 @@ import sys
 from live_models import _is_translation_batch, read_packet, write_packet
 from live_translator import load_translator
 from core.ocr_settings import (
-    DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_PIVOT, HISTORY_TURNS_MAX, QWEN_4B,
+    DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_NLLB_VINAI, FLOW_PIVOT, HISTORY_TURNS_MAX, QWEN_4B,
     QWEN_BACKEND_CUDA_PYTHON, QWEN_BACKEND_VULKAN, QWEN_CONTEXT_DEFAULT, OCRSettings, ocr_model_key,
 )
 from core.setup_models import resolve_model
@@ -103,6 +103,8 @@ def _load_translation(request, resources):
         qwen_model=request.get("qwen_model", QWEN_4B),
         qwen_backend=request.get("qwen_backend", QWEN_BACKEND_VULKAN),
     )
+    if settings.flow == FLOW_NLLB_VINAI:
+        return load_translator(direct_japanese=True)
     if settings.flow != FLOW_DIRECT:
         return load_translator(settings.ja_model)
 

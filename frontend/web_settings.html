@@ -176,7 +176,7 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
   const DIRECT = ['Nhật → Việt', 'Anh → Việt'];
   const P = [
     { name: 'Flash', ocr: ['PP-OCRv6', 'Small det', 'Small rec'], model: ['Mitsua ElanMT', 'VinAI v2'], sep: ' → ', route: PIVOT },
-    { name: 'Medium', ocr: ['PP-OCRv6', 'Medium det', 'Small rec'], model: ['NLLB-200 Distilled 600M', 'VinAI v2'], sep: ' → ', route: PIVOT },
+    { name: 'Medium', ocr: ['PP-OCRv6', 'Medium det', 'Small rec'], model: ['NLLB Custom ONNX', 'VinAI v2'], sep: ' · ', route: DIRECT },
     { name: 'High', ocr: OCR_MM, model: ['Qwen3.5-2B', 'Q4_K_M'], sep: ' ', route: DIRECT },
     { name: 'Ultra', ocr: OCR_MM, model: ['Qwen3.5-4B', 'Q4_K_M'], sep: ' ', route: DIRECT },
     { name: 'Extreme', ocr: OCR_MM, model: ['Qwen3.5-9B', 'Q4_K_M'], sep: ' ', route: DIRECT },
@@ -368,6 +368,10 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
         <label class="interface-row"><span id="crop-count-label">Số vùng dịch</span>
           <select id="crop-count"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select>
         </label>
+        <label class="interface-row"><span id="delay-label"></span>
+          <input id="post-translation-delay" type="number" min="0" max="5000" step="1" required aria-describedby="delay-hint">
+        </label>
+        <p class="settings-note" id="delay-hint"></p>
         <label class="interface-row" id="history-row" hidden><span id="history-turns-label">Lượt thoại trong ngữ cảnh (0 = Tắt)</span>
           <input id="history-turns" type="number" min="0" step="1" required>
         </label>
@@ -385,6 +389,7 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
               <select id="flow">
                 <option value="pivot">Nhật → Anh → Việt · Anh → Việt</option>
                 <option value="direct">Nhật → Việt · Anh → Việt</option>
+                <option value="nllb-vinai">Nhật → Việt · Anh → Việt (NLLB + VinAI)</option>
               </select>
             </label>
             <div class="settings-subset" id="pivot-fields" hidden>
@@ -431,11 +436,12 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
     const backend = $('#qwen-backend');
     const animation = $('#animation-enabled');
     const settingsInterface = $('#settings-interface');
-    const cropCount = $('#crop-count'), historyTurns = $('#history-turns');
+    const cropCount = $('#crop-count'), historyTurns = $('#history-turns'), delay = $('#post-translation-delay');
     const colorInput = $('#translation-color'), colorReset = $('#reset-translation-color');
     let translationColor = null;
     let boot = null, ruleName = null, qwenModel = '4b', locked = false, busy = false, serial = 0;
     const hasQwen = () => flow.value === 'direct';
+    const hasCustomNllb = () => flow.value === 'nllb-vinai';
     const labels = {
       VI: {title:'Cài đặt Live Trans', advanced:'Nâng cao', det:'Dò vùng chữ (det)', rec:'Đọc nội dung (rec)', flow:'Luồng dịch', ja:'Mô hình Nhật → Anh', pivot:'Nhật → Anh → Việt · Anh → Việt', direct:'Nhật → Việt · Anh → Việt', rule:'Quy tắc chung', ruleHint:'Áp dụng cho tất cả vùng khi dùng Qwen. Bấm Lưu để áp dụng.', none:'Không có', manage:'Quản lý quy tắc', save:'Lưu', guide:'Áp dụng ở lần Bắt đầu tiếp theo.', custom:'Tùy chỉnh', error:'Chưa lưu được cài đặt.'},
       EN: {title:'Live Trans settings', advanced:'Advanced', det:'Find text regions (det)', rec:'Read text (rec)', flow:'Translation flow', ja:'Japanese → English model', pivot:'Japanese → English → Vietnamese · English → Vietnamese', direct:'Japanese → Vietnamese · English → Vietnamese', rule:'Shared rule', ruleHint:'Applies to all regions when using Qwen. Select Save to apply.', none:'None', manage:'Manage rules', save:'Save', guide:'Applies the next time you press Start.', custom:'Custom', error:'Settings could not be saved.'}
@@ -446,19 +452,20 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       qwen_context:context.value, qwen_backend:backend.value,
       animation_enabled:animation.checked, settings_interface:settingsInterface.value,
       crop_count:Number(cropCount.value), history_turns:historyTurns.value === '' ? null : historyTurns.valueAsNumber,
-      translation_color:translationColor
+      post_translation_delay_ms:delay.value, translation_color:translationColor
     });
-    function match(d) { return boot.presets.find(p => p.det === d.det && p.rec === d.rec && p.flow === d.flow && (d.flow === 'direct' ? p.qwen_model === d.qwen_model : p.ja_model === d.ja_model)); }
-    function routeIndex(d) { const i = boot.presets.findIndex(p => p.flow === d.flow && (d.flow === 'direct' ? p.qwen_model === d.qwen_model : p.ja_model === d.ja_model)); return i < 0 ? 0 : i; }
+    function sameRoute(p, d) { return p.flow === d.flow && (d.flow === 'nllb-vinai' || (d.flow === 'direct' ? p.qwen_model === d.qwen_model : p.ja_model === d.ja_model)); }
+    function match(d) { return boot.presets.find(p => p.det === d.det && p.rec === d.rec && sameRoute(p, d)); }
+    function routeIndex(d) { const i = boot.presets.findIndex(p => sameRoute(p, d)); return i < 0 ? 0 : i; }
     function renderFields() {
-      $('#pivot-fields').hidden = hasQwen(); $('#qwen-fields').hidden = !hasQwen();
+      $('#pivot-fields').hidden = flow.value !== 'pivot'; $('#qwen-fields').hidden = !hasQwen();
       $('#history-row').hidden = !hasQwen();
       $('.animation-row').hidden = settingsInterface.value === 'minimal';
-      settingsInterface.disabled = animation.disabled = cropCount.disabled = historyTurns.disabled = busy;
+      settingsInterface.disabled = animation.disabled = cropCount.disabled = historyTurns.disabled = delay.disabled = busy;
       backend.disabled = busy;
       colorInput.disabled = busy;
       colorReset.disabled = busy || translationColor === null;
-      $('#context-label').textContent = T === labels.EN ? `${boot.qwen_models[qwenModel]} context (tokens)` : `Context ${boot.qwen_models[qwenModel]} (token)`;
+      $('#context-label').textContent = T === labels.EN ? `${boot.qwen_models[qwenModel]} context (tokens, applies after restart)` : `Context ${boot.qwen_models[qwenModel]} (token, áp dụng sau khi khởi động lại)`;
       $('#active-rule').textContent = ruleName || T.none; flow.disabled = locked || busy;
     }
     async function validate() {
@@ -477,6 +484,7 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
     }
     [det, rec, flow, jaModel].forEach(field => field.addEventListener('change', changed)); context.addEventListener('input', changed);
     historyTurns.addEventListener('input', validate);
+    delay.addEventListener('input', validate);
     [cropCount, backend].forEach(field => field.addEventListener('change', validate));
     colorInput.addEventListener('input', () => {
       translationColor = colorInput.value;
@@ -532,6 +540,7 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       const fields = [...host.querySelectorAll('.settings-form > .field')];
       fields[0].querySelector('span').textContent = T.det; fields[1].querySelector('span').textContent = T.rec; fields[2].querySelector('span').textContent = T.flow;
       $('#pivot-fields .field span').textContent = T.ja; flow.options[0].textContent = T.pivot; flow.options[1].textContent = T.direct;
+      flow.options[2].textContent = `${T.direct} (NLLB + VinAI)`;
       $('#rule-label').textContent = T.rule; $('#rule-hint').textContent = T.ruleHint;
       $('#manage-rules span').textContent = T.manage; save.textContent = T.save;
       const s = data.settings; det.value = s.det; rec.value = s.rec; flow.value = s.flow; jaModel.value = s.ja_model;
@@ -549,6 +558,9 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       colorReset.textContent = data.translation_color_labels.default;
       translationColor = s.translation_color;
       colorInput.value = translationColor || data.default_translation_color;
+      $('#delay-label').textContent = data.delay_label;
+      $('#delay-hint').textContent = data.delay_hint;
+      delay.max = data.delay_max; delay.value = s.post_translation_delay_ms;
       $('#history-turns-label').textContent = data.crop_labels.history;
       historyTurns.max = data.history_turns_max;
       cropCount.value = s.crop_count;
@@ -572,13 +584,15 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       if (!boot) return; const preset = boot.presets[st.index];
       det.value = preset.det; rec.value = preset.rec; flow.value = preset.flow;
       locked = preset.name === 'Flash' || preset.name === 'Medium';
-      if (preset.flow === 'direct') qwenModel = preset.qwen_model; else jaModel.value = preset.ja_model;
+      if (preset.flow === 'direct') qwenModel = preset.qwen_model;
+      else if (preset.flow === 'pivot') jaModel.value = preset.ja_model;
       renderFields(); renderSummary(); validate();
     }
 
     function renderSummary() {
       if (!boot) return; const preset = match(draft());
-      const model = hasQwen() ? [boot.qwen_models[qwenModel]] : [jaModel.selectedOptions[0].textContent, 'VinAI v2'];
+      const model = hasQwen() ? [boot.qwen_models[qwenModel]]
+        : [hasCustomNllb() ? 'NLLB Custom ONNX' : jaModel.selectedOptions[0].textContent, 'VinAI v2'];
       const ocr = ['PP-OCRv6', det.value === 'medium' ? 'Medium det' : 'Small det', rec.value === 'medium' ? 'Medium rec' : 'Small rec'];
       slider.setAttribute('aria-valuenow', st.index); slider.setAttribute('aria-valuetext', preset ? preset.name : T.custom);
       const tok = (key, text) => {
@@ -589,8 +603,8 @@ body { display:block; overflow:auto; } main { width:min(468px, 100%); margin:0 a
       nameEl.innerHTML = tok('name', preset ? preset.name : T.custom);
       nameEl.classList.toggle('is-custom', !preset);
       ocrEl.innerHTML = line('ocr', ocr, ' · ');
-      modelEl.innerHTML = line('model', model, hasQwen() ? ' ' : ' → ');
-      routeEl.innerHTML = line('route', [hasQwen() ? T.direct : T.pivot], ' · ');
+      modelEl.innerHTML = line('model', model, hasQwen() ? ' ' : hasCustomNllb() ? ' · ' : ' → ');
+      routeEl.innerHTML = line('route', [flow.value === 'pivot' ? T.pivot : T.direct], ' · ');
     }
 
     let nextStorm = 0;

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 from shutil import copyfileobj
+import ssl
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -17,16 +18,21 @@ from urllib.request import Request, urlopen
 from zipfile import ZipFile, is_zipfile
 
 from core.ocr_settings import (
-    DEFAULT_JA_MODEL, FLOW_DIRECT, JA_MODEL_KEYS, OCR_SIZES,
+    DEFAULT_JA_MODEL, FLOW_DIRECT, FLOW_NLLB_VINAI, JA_MODEL_KEYS, OCR_SIZES,
     QWEN_2B, QWEN_4B, QWEN_9B, QWEN_27B, QWEN_BACKEND_CUDA_PYTHON, QWEN_MODEL_LABELS,
     OCRSettings, ocr_model_key,
 )
 from core.setup_environment import read_setup_environment
-from core.setup_types import DownloadInterrupted, InstallationItem, InstallLog, Progress
+from core.setup_types import DownloadCertificateError, DownloadInterrupted, InstallationItem, InstallLog, Progress
 
 
 _MITSUA = "Mitsua/elan-mt-bt-ja-en"
 _NLLB = "facebook/nllb-200-distilled-600M"
+_NLLB_CUSTOM = "belumind/nllb-trilingual-en-vi-ja-onnx"
+NLLB_CUSTOM_MODEL_KEY = "translate-ja-vi-nllb-custom"
+NLLB_ONNX_FILES = (
+    "encoder_model_quantized.onnx", "decoder_model_quantized.onnx", "decoder_with_past_model_quantized.onnx",
+)
 _VINAI = "vinai/vinai-translate-en2vi-v2"
 QWEN_MODEL_KEY = "live-translate-qwen"
 QWEN_2B_MODEL_KEY = "live-translate-qwen-2b"
@@ -103,6 +109,10 @@ _PROFILES = {
     "nllb": _Files(("config.json",), (_WEIGHTS, (("tokenizer.json",), ("sentencepiece.bpe.model",))), (
         "generation_config.json", "tokenizer_config.json", "special_tokens_map.json",
     )),
+    "nllb-onnx": _Files(
+        ("config.json", "tokenizer.json", "tokenizer_config.json", *NLLB_ONNX_FILES),
+        optional=("special_tokens_map.json",),
+    ),
     "live-ocr": _Files(("config.json", "preprocessor_config.json", "inference.yml", "model.safetensors")),
 }
 
@@ -166,6 +176,8 @@ def _model_specs(root: Path) -> dict[str, _Model]:
         _Model(JA_MODEL_KEYS[DEFAULT_JA_MODEL], "Japanese → English (Mitsua ElanMT)", _MITSUA, _PROFILES["marian"]),
         _Model("live-translate-en-vi", "English → Vietnamese (VinAI Translate v2)", _VINAI, _PROFILES["mbart"]),
         _Model(JA_MODEL_KEYS["nllb"], "Japanese → English (NLLB-200 Distilled 600M)", _NLLB, _PROFILES["nllb"]),
+        _Model(NLLB_CUSTOM_MODEL_KEY, "Japanese → Vietnamese (NLLB Custom ONNX)", _NLLB_CUSTOM,
+               _PROFILES["nllb-onnx"]),
     ]
     for size in OCR_SIZES:
         for role in ("det", "rec"):
@@ -418,7 +430,8 @@ def model_items(
         runtime_key = QWEN_CUDA_RUNTIME_KEY if settings.qwen_backend == QWEN_BACKEND_CUDA_PYTHON else QWEN_RUNTIME_KEY
         selected.update({_QWEN_VARIANTS[settings.qwen_model][0], runtime_key})
     else:
-        selected.update({JA_MODEL_KEYS[settings.ja_model], "live-translate-en-vi"})
+        japanese_key = NLLB_CUSTOM_MODEL_KEY if settings.flow == FLOW_NLLB_VINAI else JA_MODEL_KEYS[settings.ja_model]
+        selected.update({japanese_key, "live-translate-en-vi"})
 
     def check(model):
         return _ready_path(root, read_setup_environment(root), model) is not None
@@ -461,7 +474,7 @@ def model_items(
 def available_model_settings(root: Path) -> OCRSettings:
     """Use the defaults for selected add-ons whose local files are missing."""
     settings = OCRSettings.load(root)
-    if settings.flow == FLOW_DIRECT:
+    if settings.flow in (FLOW_DIRECT, FLOW_NLLB_VINAI):
         return settings
     missing = {
         item.key for item in model_items(root, settings)
@@ -475,6 +488,27 @@ def available_model_settings(root: Path) -> OCRSettings:
     )
 
 
+def _open_model_url(request):
+    try:
+        return urlopen(request, timeout=30)
+    except (URLError, ssl.SSLCertVerificationError) as error:
+        reason = getattr(error, "reason", error)
+        # OpenSSL codes for missing issuers or an incomplete certificate chain.
+        if isinstance(reason, ssl.SSLCertVerificationError) and reason.verify_code in {2, 20, 21}:
+            try:
+                import certifi
+            except ImportError:
+                pass  # Setup may run before the user has installed its libraries.
+            else:
+                context = ssl.create_default_context()
+                try:
+                    context.load_verify_locations(cafile=certifi.where())
+                except OSError as ca_error:
+                    raise DownloadCertificateError("Could not load the certifi CA bundle.") from ca_error
+                return urlopen(request, timeout=30, context=context)
+        raise
+
+
 def _request(env, url, **headers):
     request = Request(url, headers={"Accept-Encoding": "identity", **headers})
     if token := env.get("HF_TOKEN"):
@@ -482,13 +516,19 @@ def _request(env, url, **headers):
             raise RuntimeError("The configured Hugging Face token has an invalid format.")
         request.add_unredirected_header("Authorization", f"Bearer {token}")
     try:
-        return urlopen(request, timeout=30)
+        return _open_model_url(request)
     except HTTPError as error:
         error.close()
         if error.code in {408, 425, 429, 500, 502, 503, 504}:
             raise DownloadInterrupted(f"Model server temporarily returned HTTP {error.code}.") from error
         raise RuntimeError(f"Model server returned HTTP {error.code}.") from error
     except (URLError, OSError, HTTPException) as error:
+        reason = getattr(error, "reason", error)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            host = urlsplit(url).hostname
+            raise DownloadCertificateError(
+                f"Could not verify the TLS certificate for {host}: {reason.verify_message}."
+            ) from error
         raise DownloadInterrupted("Could not connect to the model server.") from error
 
 

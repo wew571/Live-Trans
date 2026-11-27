@@ -12,6 +12,10 @@ class DownloadInterrupted(RuntimeError):
     """A temporary connection failure during an install."""
 
 
+class DownloadCertificateError(RuntimeError):
+    """TLS certificate verification failed during an install."""
+
+
 @dataclass(frozen=True)
 class InstallationItem:
     key: str

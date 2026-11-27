@@ -77,6 +77,9 @@ def _has_payload(distribution: metadata.Distribution) -> bool:
     if not source and not extensions:
         source = [record for record in records if record.suffix == ".py"]
     if not source and not extensions:
+        # Native-only wheels such as nvidia-cublas-cu12 contain only libraries.
+        extensions = [record for record in records if record.suffix == ".dll"]
+    if not source and not extensions:
         return False
     first_sources = sorted(source, key=lambda record: len(record.parts))[:1]
     return all(distribution.locate_file(record).is_file() for record in first_sources + extensions)

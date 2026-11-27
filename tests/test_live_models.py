@@ -26,6 +26,7 @@ def child_modules(tmp_path, monkeypatch):
     def write_module(name, source):
         (tmp_path / f"{name}.py").write_text(textwrap.dedent(source), encoding="utf-8")
 
+    write_module("ctranslate2", "raise ImportError('CTranslate2 is not installed')")
     return write_module
 
 
@@ -61,7 +62,7 @@ def test_qwen_preset_round_trips_and_existing_settings_stay_on_the_pivot(tmp_pat
         for name, preset in PRESETS.items()
     } == {
         "Flash": ("small", "small", "mitsua", "pivot", "4b"),
-        "Medium": ("medium", "small", "nllb", "pivot", "4b"),
+        "Medium": ("medium", "small", "mitsua", "nllb-vinai", "4b"),
         "High": ("medium", "medium", "mitsua", "direct", "2b"),
         "Ultra": ("medium", "medium", "mitsua", "direct", "4b"),
         "Extreme": ("medium", "medium", "mitsua", "direct", "9b"),
@@ -87,6 +88,24 @@ def test_qwen_preset_round_trips_and_existing_settings_stay_on_the_pivot(tmp_pat
     for invalid in (999, 25001, True, "3000"):
         with pytest.raises(ValueError):
             OCRSettings(flow="direct", qwen_context=invalid)
+
+
+def test_medium_batches_japanese_directly_and_uses_vinai_for_english(monkeypatch):
+    from core import live_translator
+
+    def japanese(texts):
+        assert texts == ["こんにちは", "ありがとう"]
+        return ["Xin chao", "Cam on"]
+
+    def english(texts):
+        assert texts == ["Hello"]
+        return ["Chao"]
+
+    monkeypatch.setattr(live_translator, "_load_custom_nllb_translator", lambda: japanese, raising=False)
+    monkeypatch.setattr(live_translator, "_load_mbart_translator", lambda: english)
+
+    translate = live_translator.load_translator(direct_japanese=True)
+    assert translate(["こんにちは", "Hello", "123", "ありがとう"]) == ["Xin chao", "Chao", "", "Cam on"]
 
 
 def test_multi_crop_settings_round_trip_and_preserve_pipeline_defaults(tmp_path):
@@ -530,6 +549,7 @@ def test_live_mbart_selects_complete_fp16_checkpoint_on_cuda(
     monkeypatch.setitem(sys.modules, "transformers.utils", SimpleNamespace(
         is_accelerate_available=lambda: accelerate,
     ))
+    monkeypatch.setitem(sys.modules, "ctranslate2", None)
 
     assert live_translator._load_mbart_translator()(["one"]) == ["dịch one"]
     assert len(loads) == 1
@@ -544,6 +564,171 @@ def test_live_mbart_selects_complete_fp16_checkpoint_on_cuda(
         assert source == "vinai/vinai-translate-en2vi-v2"
         assert "device_map" not in options
         assert moves == [device]
+
+
+def _ctranslate2_runtime(monkeypatch, tmp_path, *, use_cuda, blas=True):
+    from core import live_translator
+
+    calls = SimpleNamespace(conversions=[], translators=[], batches=[], max_lengths=[])
+
+    class Translator:
+        def __init__(self, path, **kwargs):
+            calls.translators.append((path, kwargs))
+
+        def translate_batch(self, batch, **kwargs):
+            calls.batches.append((batch, kwargs))
+            return [SimpleNamespace(hypotheses=[["dịch", *tokens]]) for tokens in batch]
+
+    def convert(model_id, tokenizer, output):
+        calls.conversions.append((model_id, output))
+        (output / "model.bin").write_bytes(b"weights")
+        return 1024
+
+    monkeypatch.setattr(live_translator, "_ROOT", tmp_path)
+    monkeypatch.setattr(live_translator, "_convert_ctranslate2", convert)
+    monkeypatch.setattr(live_translator, "_load_cuda_blas", lambda: blas)
+    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(Translator=Translator))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: use_cuda), set_num_threads=lambda _: None,
+    ))
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        AutoModelForSeq2SeqLM=SimpleNamespace(from_pretrained=lambda *_, **__: pytest.fail("Transformers loaded")),
+    ))
+
+    class Tokenizer:
+        pad_token = "<pad>"
+
+        def __call__(self, text, *, truncation, max_length):
+            assert truncation is True
+            calls.max_lengths.append(max_length)
+            return {"input_ids": text.split()}
+
+        def convert_ids_to_tokens(self, ids):
+            return {17: "vi_VN", 42: "eng_Latn"}[ids] if isinstance(ids, int) else list(ids)
+
+        def convert_tokens_to_ids(self, tokens):
+            return tokens
+
+        def decode(self, ids, *, skip_special_tokens):
+            assert skip_special_tokens is True
+            return " ".join(ids)
+
+    return live_translator, Tokenizer(), calls
+
+
+@pytest.mark.parametrize("use_cuda", [True, False])
+@pytest.mark.parametrize(
+    ("options", "prefix", "input_limit", "max_length"),
+    [
+        ({"forced_bos_token_id": 42}, ["eng_Latn"], 512, 512),
+        ({"decoder_start_token_id": 17}, ["vi_VN"], None, 1024),
+        ({}, None, None, 1024),
+    ],
+)
+def test_live_seq2seq_translates_with_a_cached_ctranslate2_conversion(
+    monkeypatch, tmp_path, use_cuda, options, prefix, input_limit, max_length,
+):
+    live_translator, tokenizer, calls = _ctranslate2_runtime(monkeypatch, tmp_path, use_cuda=use_cuda)
+
+    def load(model_id="example/model"):
+        return live_translator._load_batched_seq2seq(
+            model_id, tokenizer, ct2_name="example", input_limit=input_limit, **options,
+        )
+
+    assert load()(["một hai", "ba"]) == ["dịch một hai", "dịch ba"]
+    checkpoint = tmp_path / "models" / "live-ct2" / "example"
+    assert [model_id for model_id, _ in calls.conversions] == ["example/model"]
+    assert calls.translators == [(str(checkpoint), {"device": "cuda" if use_cuda else "cpu", "intra_threads": 4})]
+    batch, decoding = calls.batches[0]
+    assert batch == [["một", "hai"], ["ba"]]
+    assert decoding == {
+        "target_prefix": None if prefix is None else [prefix, prefix], "beam_size": 1,
+        "max_decoding_length": 96, "max_batch_size": 32, "suppress_sequences": [["<pad>"]],
+    }
+    assert calls.max_lengths == [max_length, max_length]
+
+    load()
+    assert len(calls.conversions) == 1
+    load("example/updated-model")
+    assert [model_id for model_id, _ in calls.conversions] == ["example/model", "example/updated-model"]
+    assert json.loads((checkpoint / "mangalens-source.json").read_text(encoding="utf-8")) == {
+        "model": "example/updated-model", "max_positions": 1024,
+    }
+    assert sorted(path.name for path in checkpoint.parent.iterdir()) == ["example"]
+
+
+def test_live_seq2seq_keeps_transformers_without_cuda_12_blas_or_a_working_conversion(monkeypatch, tmp_path):
+    live_translator, tokenizer, calls = _ctranslate2_runtime(monkeypatch, tmp_path, use_cuda=True, blas=False)
+
+    assert live_translator._load_ctranslate2("example/model", tokenizer, "example", True, None, {}) is None
+    assert not calls.conversions
+
+    def fail(*_):
+        raise NotImplementedError("unsupported architecture")
+
+    monkeypatch.setattr(live_translator, "_convert_ctranslate2", fail)
+    assert live_translator._load_ctranslate2("example/model", tokenizer, "example", False, None, {}) is None
+    assert not calls.translators
+    assert not (tmp_path / "models" / "live-ct2" / "example").exists()
+
+
+@pytest.mark.parametrize("transformers_available", [True, False])
+def test_live_seq2seq_falls_back_when_ctranslate2_cannot_open_checkpoint(
+    monkeypatch, tmp_path, caplog, transformers_available,
+):
+    live_translator, _, _ = _ctranslate2_runtime(monkeypatch, tmp_path, use_cuda=True)
+
+    def fail_ctranslate2(*_, **__):
+        raise RuntimeError("CTranslate2 cannot open the weights")
+
+    class Inputs(dict):
+        def to(self, device):
+            assert device == "cuda:0"
+            return self
+
+    class Model:
+        config = SimpleNamespace(max_position_embeddings=1024)
+
+        def eval(self):
+            return self
+
+        def to(self, device):
+            assert device == "cuda:0"
+            return self
+
+        def generate(self, *, texts, forced_bos_token_id, **kwargs):
+            assert forced_bos_token_id == 42
+            return [f"dịch {text}" for text in texts]
+
+    def load_transformers(*_, **__):
+        if not transformers_available:
+            raise RuntimeError("Transformers cannot load the weights")
+        return Model()
+
+    monkeypatch.setattr(sys.modules["ctranslate2"], "Translator", fail_ctranslate2)
+    monkeypatch.setattr(sys.modules["transformers"].AutoModelForSeq2SeqLM, "from_pretrained", load_transformers)
+    monkeypatch.setattr(sys.modules["torch"], "float16", "float16", raising=False)
+    monkeypatch.setattr(sys.modules["torch"], "inference_mode", nullcontext, raising=False)
+
+    class Tokenizer:
+        def __call__(self, texts, *, max_length, **kwargs):
+            assert max_length == 512
+            return Inputs(texts=texts)
+
+        def batch_decode(self, outputs, *, skip_special_tokens):
+            return outputs
+
+    def load():
+        return live_translator._load_batched_seq2seq(
+            "example/model", Tokenizer(), ct2_name="example", input_limit=512, forced_bos_token_id=42,
+        )
+
+    if transformers_available:
+        assert load()(["one"]) == ["dịch one"]
+    else:
+        with pytest.raises(RuntimeError, match="Transformers cannot load the weights"):
+            load()
+    assert "CTranslate2 cannot open the weights" in caplog.text
 
 
 @pytest.mark.parametrize("det,rec", [("small", "small"), ("medium", "small"), ("small", "medium"), ("medium", "medium")])

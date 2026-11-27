@@ -3,7 +3,9 @@ from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import ssl
 from threading import Thread
+from urllib.error import URLError
 
 import pytest
 
@@ -50,7 +52,7 @@ def test_startup_lists_addons_separately_from_required_models(tmp_path, monkeypa
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     items = model_items(tmp_path, include_optional=True)
     assert {item.key for item in items if item.optional} == {
-        "translate-ja-en-nllb", "live-ocr-medium-det", "live-ocr-medium-rec",
+        "translate-ja-en-nllb", "translate-ja-vi-nllb-custom", "live-ocr-medium-det", "live-ocr-medium-rec",
         "live-translate-qwen", "live-translate-qwen-2b", "live-qwen-runtime",
         "live-translate-qwen-9b", "live-translate-qwen-27b", "live-qwen-cuda-runtime",
     }
@@ -230,6 +232,16 @@ def test_incomplete_cache_cannot_hide_full_existing_snapshot(tmp_path):
     assert resolve_model(tmp_path, "translate-ja-en") == str(snapshot)
 
 
+def test_medium_requires_custom_onnx_instead_of_japanese_to_english_weights(tmp_path):
+    from core.ocr_settings import PRESETS
+    from core.setup_models import model_items, resolve_model
+
+    key = "translate-ja-vi-nllb-custom"
+    items = {item.key for item in model_items(tmp_path, PRESETS["Medium"])}
+    assert items == {key, "live-translate-en-vi", "live-ocr-medium-det", "live-ocr-rec"}
+    assert resolve_model(tmp_path, key) == "belumind/nllb-trilingual-en-vi-ja-onnx"
+
+
 def test_saved_nllb_selection_scans_its_own_checkpoint(tmp_path, monkeypatch):
     from core.ocr_settings import OCRSettings
     from core.setup_models import resolve_model
@@ -398,6 +410,59 @@ def test_model_download_preserves_a_verified_resume_candidate_and_reports_bytes(
     assert weight.read_bytes() == _WEIGHT_DATA
     assert item.is_ready()
     assert not list((tmp_path / "models").rglob("*.part"))
+
+
+def _certificate_error(code, message):
+    error = ssl.SSLCertVerificationError(1, message)
+    error.verify_code = code
+    error.verify_message = message
+    return URLError(error)
+
+
+def test_model_request_retries_missing_issuer_with_verified_public_cas(monkeypatch):
+    from core import setup_models
+
+    response = object()
+    calls = []
+
+    def open_url(request, timeout, context=None):
+        calls.append((request, timeout, context))
+        if context is None:
+            raise _certificate_error(20, "unable to get local issuer certificate")
+        return response
+
+    monkeypatch.setattr(setup_models, "urlopen", open_url)
+    result = setup_models._request({}, "https://github.com/model", Range="bytes=32-")
+
+    assert result is response
+    assert len(calls) == 2
+    first, retry = calls
+    assert retry[:2] == first[:2]
+    assert retry[0].get_header("Range") == "bytes=32-"
+    assert retry[2].check_hostname and retry[2].verify_mode == ssl.CERT_REQUIRED
+
+
+@pytest.mark.parametrize(("code", "message", "attempts"), [
+    (20, "unable to get local issuer certificate", 2),
+    (10, "certificate has expired", 1),
+    (62, "hostname mismatch", 1),
+])
+def test_model_request_reports_certificate_failures_without_network_retry(monkeypatch, code, message, attempts):
+    from core import setup_models
+    from core.setup_types import DownloadInterrupted
+
+    calls = []
+
+    def open_url(request, timeout, context=None):
+        calls.append(context)
+        raise _certificate_error(code, message)
+
+    monkeypatch.setattr(setup_models, "urlopen", open_url)
+    with pytest.raises(RuntimeError, match=f"TLS certificate.*github.com.*{message}") as failure:
+        setup_models._request({}, "https://github.com/model")
+
+    assert not isinstance(failure.value, DownloadInterrupted)
+    assert len(calls) == attempts
 
 
 def test_same_size_corrupt_download_is_never_published(tmp_path, monkeypatch):

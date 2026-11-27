@@ -15,8 +15,11 @@ from core.ocr_settings import (
     DEFAULT_JA_MODEL,
     DEFAULT_TRANSLATION_COLOR,
     FLOW_DIRECT,
+    FLOW_NLLB_VINAI,
     FLOW_PIVOT,
     HISTORY_TURNS_MAX,
+    POST_TRANSLATION_DELAY_MAX,
+    valid_post_translation_delay,
     INTERFACE_ADVANCED,
     INTERFACE_MINIMAL,
     OCR_SIZES,
@@ -37,7 +40,7 @@ from frontend.qwen_rules_window import QwenRulesWindow
 _OCR_OPTIONS = {f"PP-OCRv6 {size.title()}": size for size in OCR_SIZES}
 _JA_OPTIONS = {"Mitsua ElanMT": DEFAULT_JA_MODEL, "NLLB-200 Distilled 600M": "nllb"}
 _PRESET_NAMES = tuple(PRESETS)
-_LOCKED_PIVOT_PRESETS = ("Flash", "Medium")
+_LOCKED_FLOW_PRESETS = ("Flash", "Medium")
 
 
 @dataclass(frozen=True)
@@ -72,14 +75,18 @@ _LABELS = {
         "interface": "Giao diện", "minimal_interface": "Tối giản", "advanced_interface": "Nâng cao",
         "translation_color": "Màu chữ bản dịch", "choose_color": "Chọn màu", "default_color": "Mặc định",
         "crop_count": "Số vùng dịch", "history_turns": "Lượt thoại trong ngữ cảnh (0 = Tắt)",
+        "post_translation_delay": "Thời gian chờ sau khi hiện bản dịch (ms)",
+        "delay_hint": "0–5.000 ms; 0 = không chờ.",
+        "invalid_delay": "Nhập thời gian chờ nguyên từ 0 đến 5.000 ms.",
         "invalid_history": f"Nhập số lượt thoại nguyên từ 0 đến {HISTORY_TURNS_MAX}.",
         "det": "Dò vùng chữ (det)", "rec": "Đọc nội dung (rec)", "flow": "Luồng dịch",
-        "ja_model": "Mô hình Nhật → Anh", "context": "Context {model} (token)",
+        "ja_model": "Mô hình Nhật → Anh", "context": "Context {model} (token, áp dụng sau khi khởi động lại)",
         "qwen_backend": "Backend Qwen",
         "backend_default": "{name} (mặc định)",
         "backend_optional": "{name} (bổ sung)",
         "backend_hint": "CUDA cần GPU NVIDIA, PyTorch CUDA 13 và runtime bổ sung trong Thiết lập.",
         "pivot": "Nhật → Anh → Việt", "direct": "Nhật → Việt · Anh → Việt",
+        "nllb-vinai": "Nhật → Việt · Anh → Việt (NLLB + VinAI)",
         "english_direct": "Anh → Việt",
         "guide": "Áp dụng ở lần Bắt đầu tiếp theo.",
         "save": "Lưu", "missing": "Đóng Cài đặt và mở Thiết lập để tải:\n{models}",
@@ -93,14 +100,18 @@ _LABELS = {
         "interface": "Interface", "minimal_interface": "Minimal", "advanced_interface": "Advanced",
         "translation_color": "Translation text color", "choose_color": "Choose color", "default_color": "Default",
         "crop_count": "Translation regions", "history_turns": "Dialogue turns in context (0 = Off)",
+        "post_translation_delay": "Wait after showing translation (ms)",
+        "delay_hint": "0–5,000 ms; 0 = no wait.",
+        "invalid_delay": "Enter a whole number from 0 to 5,000 ms for the delay.",
         "invalid_history": f"Enter a whole number from 0 to {HISTORY_TURNS_MAX} for dialogue turns.",
         "det": "Find text regions (det)", "rec": "Read text (rec)", "flow": "Translation flow",
-        "ja_model": "Japanese → English model", "context": "{model} context (tokens)",
+        "ja_model": "Japanese → English model", "context": "{model} context (tokens, applies after restart)",
         "qwen_backend": "Qwen backend",
         "backend_default": "{name} (default)",
         "backend_optional": "{name} (optional)",
         "backend_hint": "CUDA requires an NVIDIA GPU, PyTorch CUDA 13 and the optional runtime in Setup.",
         "pivot": "Japanese → English → Vietnamese", "direct": "Japanese → Vietnamese · English → Vietnamese",
+        "nllb-vinai": "Japanese → Vietnamese · English → Vietnamese (NLLB + VinAI)",
         "english_direct": "English → Vietnamese",
         "guide": "Applies the next time you press Start.",
         "save": "Save", "missing": "Close Settings and open Setup to install:\n{models}",
@@ -130,7 +141,7 @@ def _routing_preset_index(flow, ja_model, qwen_model):
     for index, preset in enumerate(PRESETS.values()):
         if preset.flow != flow:
             continue
-        if (preset.qwen_model if flow == FLOW_DIRECT else preset.ja_model) == (
+        if flow == FLOW_NLLB_VINAI or (preset.qwen_model if flow == FLOW_DIRECT else preset.ja_model) == (
             qwen_model if flow == FLOW_DIRECT else ja_model
         ):
             return index
@@ -174,14 +185,14 @@ class OCRSettingsWindow(ctk.CTkToplevel):
         self._language = language
         self._selected_rule = settings.qwen_rule
         self._qwen_model = settings.qwen_model
-        self._locked_flow = settings.preset in _LOCKED_PIVOT_PRESETS
+        self._locked_flow = settings.preset in _LOCKED_FLOW_PRESETS
         self._rules_window = None
         self._appearance = None
         self._appearance_job = None
         self._appearance_started = 0.0
         self._ultimate_sky = None
         self._field_labels = {}
-        self._flow_options = {self._texts[flow]: flow for flow in (FLOW_PIVOT, FLOW_DIRECT)}
+        self._flow_options = {self._texts[flow]: flow for flow in (FLOW_PIVOT, FLOW_NLLB_VINAI, FLOW_DIRECT)}
         self._backend_options = _backend_options(self._texts)
 
         self.title(self._texts["title"])
@@ -252,6 +263,13 @@ class OCRSettingsWindow(ctk.CTkToplevel):
 
         crop_row, self.crop_count_menu = self._numeric_row(content, "crop_count", settings.crop_count, (1, 2, 3))
         crop_row.pack(fill="x", pady=(0, 8))
+        delay_row = ctk.CTkFrame(content, fg_color="transparent")
+        delay_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(delay_row, text=self._texts["post_translation_delay"], wraplength=250).pack(side="left")
+        self.delay_entry = ctk.CTkEntry(delay_row, width=100)
+        self.delay_entry.insert(0, str(settings.post_translation_delay_ms))
+        self.delay_entry.pack(side="right")
+        ctk.CTkLabel(content, text=self._texts["delay_hint"], text_color="#bac2de").pack(anchor="w")
         self.history_row = ctk.CTkFrame(content, fg_color="transparent")
         ctk.CTkLabel(self.history_row, text=self._texts["history_turns"]).pack(side="left")
         self.history_entry = ctk.CTkEntry(self.history_row, width=136)
@@ -302,6 +320,7 @@ class OCRSettingsWindow(ctk.CTkToplevel):
         self.save_button.pack(fill="x")
         self.context_entry.bind("<KeyRelease>", self._update_selection)
         self.history_entry.bind("<KeyRelease>", self._update_selection)
+        self.delay_entry.bind("<KeyRelease>", self._update_selection)
         self.bind("<Map>", self._map_appearance, add="+")
         self.bind("<Unmap>", self._unmap_appearance, add="+")
         self._update_selection()
@@ -440,7 +459,7 @@ class OCRSettingsWindow(ctk.CTkToplevel):
         name = _PRESET_NAMES[index]
         preset = PRESETS[name]
         self.slider.set(index)
-        self._locked_flow = name in _LOCKED_PIVOT_PRESETS
+        self._locked_flow = name in _LOCKED_FLOW_PRESETS
         if preset.flow == FLOW_DIRECT:
             self._qwen_model = preset.qwen_model
         self.det_menu.set(_label_for(_OCR_OPTIONS, preset.det))
@@ -486,6 +505,12 @@ class OCRSettingsWindow(ctk.CTkToplevel):
 
     def _selection(self):
         flow = self._flow_options[self.flow_menu.get()]
+        try:
+            delay = int(self.delay_entry.get())
+        except ValueError:
+            return None
+        if not valid_post_translation_delay(delay):
+            return None
         history = self._history_value()
         if history is None:
             if flow == FLOW_DIRECT:
@@ -508,6 +533,7 @@ class OCRSettingsWindow(ctk.CTkToplevel):
             settings_interface=self._interface(),
             crop_count=int(self.crop_count_menu.get()),
             history_turns=history,
+            post_translation_delay_ms=delay,
             translation_color=self._translation_color,
         )
 
@@ -546,28 +572,42 @@ class OCRSettingsWindow(ctk.CTkToplevel):
         elif not direct:
             self.history_row.pack_forget()
         self.context_label.configure(text=self._texts["context"].format(model=QWEN_MODEL_LABELS[self._qwen_model]))
-        active, inactive = (self.context_frame, self.pivot_frame) if direct else (
-            self.pivot_frame, self.context_frame,
-        )
-        inactive.pack_forget()
-        active.pack(fill="x")
+        for frame, visible in ((self.context_frame, direct), (self.pivot_frame, flow == FLOW_PIVOT)):
+            if visible:
+                frame.pack(fill="x")
+            else:
+                frame.pack_forget()
         settings = self._selection()
         preset = settings.preset if settings else None
         self.preset_name.configure(text=preset or self._texts["custom"])
         index = _routing_preset_index(flow, _JA_OPTIONS[self.ja_menu.get()], self._qwen_model)
         if preset:
             index = _PRESET_NAMES.index(preset)
-            self._locked_flow = preset in _LOCKED_PIVOT_PRESETS
+            self._locked_flow = preset in _LOCKED_FLOW_PRESETS
         self.slider.set(index)
         self._apply_appearance(index, preset)
         self.flow_menu.configure(state="disabled" if self._locked_flow else "normal")
         ocr = f"PP-OCRv6 · {self.det_menu.get().split()[-1]} det · {self.rec_menu.get().split()[-1]} rec"
-        translator = QWEN_MODEL_LABELS[self._qwen_model] if direct else f"{self.ja_menu.get()} → VinAI v2"
-        route = self._texts[flow] if direct else f"{self._texts[flow]} · {self._texts['english_direct']}"
+        route = self._texts[FLOW_DIRECT]
+        if direct:
+            translator = QWEN_MODEL_LABELS[self._qwen_model]
+        elif flow == FLOW_NLLB_VINAI:
+            translator = "NLLB Custom ONNX · VinAI v2"
+        else:
+            translator = f"{self.ja_menu.get()} → VinAI v2"
+            route = f"{self._texts[flow]} · {self._texts['english_direct']}"
         self.summary.configure(text=f"{ocr}\n{translator}\n{route}")
         self._check_selection(settings)
 
     def _check_selection(self, settings, *, saving=False):
+        if settings is None:
+            try:
+                delay = int(self.delay_entry.get())
+            except ValueError:
+                delay = -1
+            if not valid_post_translation_delay(delay):
+                self._show_status(self._texts["invalid_delay"], "#f38ba8")
+                return False
         if settings is None and self._history_value() is None:
             self._show_status(self._texts["invalid_history"], "#f38ba8")
             return False
@@ -591,4 +631,3 @@ class OCRSettingsWindow(ctk.CTkToplevel):
             return
         self.destroy()
         self._on_save(settings)
-

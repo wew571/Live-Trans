@@ -6,8 +6,10 @@ from pywintypes import error as Win32Error
 
 from core.ocr_settings import (
     DEFAULT_TRANSLATION_COLOR,
-    FLOW_PIVOT,
+    FLOW_DIRECT,
     HISTORY_TURNS_MAX,
+    POST_TRANSLATION_DELAY_MAX,
+    valid_post_translation_delay,
     PRESETS,
     QWEN_CONTEXT_MAX,
     QWEN_CONTEXT_MIN,
@@ -63,6 +65,7 @@ class WebSettingsSession:
                 "settings_interface": self._original.settings_interface,
                 "crop_count": self._original.crop_count,
                 "history_turns": self._original.history_turns,
+                "post_translation_delay_ms": self._original.post_translation_delay_ms,
                 "translation_color": self._original.translation_color,
                 "rule_name": self._rule_name(),
             },
@@ -75,6 +78,9 @@ class WebSettingsSession:
                 "count": self._texts["crop_count"], "history": self._texts["history_turns"],
             },
             "history_turns_max": HISTORY_TURNS_MAX,
+            "delay_max": POST_TRANSLATION_DELAY_MAX,
+            "delay_label": self._texts["post_translation_delay"],
+            "delay_hint": self._texts["delay_hint"],
             "translation_color_labels": {
                 "label": self._texts["translation_color"], "default": self._texts["default_color"],
             },
@@ -86,9 +92,16 @@ class WebSettingsSession:
     def _check(self, draft, *, save):
         try:
             flow = draft["flow"]
+            raw_delay = draft.get("post_translation_delay_ms", self._original.post_translation_delay_ms)
+            try:
+                delay = int(raw_delay) if type(raw_delay) in (int, str) else -1
+            except ValueError:
+                delay = -1
+            if not valid_post_translation_delay(delay):
+                return {"ok": False, "message": self._texts["invalid_delay"], "preset": None}
             history = draft.get("history_turns", self._original.history_turns)
             if not valid_history_turns(history):
-                if flow != FLOW_PIVOT:
+                if flow == FLOW_DIRECT:
                     return {"ok": False, "message": self._texts["invalid_history"], "preset": None}
                 history = self._original.history_turns
             raw_context = draft["qwen_context"]
@@ -97,7 +110,7 @@ class WebSettingsSession:
             except ValueError:
                 context = 0
             if not QWEN_CONTEXT_MIN <= context <= QWEN_CONTEXT_MAX:
-                if flow != FLOW_PIVOT:
+                if flow == FLOW_DIRECT:
                     return {"ok": False, "message": self._texts["invalid_context"], "preset": None}
                 context = self._original.qwen_context
             settings = replace(
@@ -108,6 +121,7 @@ class WebSettingsSession:
                 settings_interface=draft.get("settings_interface", self._original.settings_interface),
                 crop_count=draft.get("crop_count", self._original.crop_count),
                 history_turns=history,
+                post_translation_delay_ms=delay,
                 translation_color=draft.get("translation_color", self._original.translation_color),
             )
         except (KeyError, TypeError, ValueError):
